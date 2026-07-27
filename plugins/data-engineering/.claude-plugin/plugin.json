@@ -1,0 +1,22 @@
+{
+  "name": "data-engineering",
+  "version": "1.0.0",
+  "description": "Data engineering workflows for dimensional modeling, data warehouse design, data quality, ETL, ELT, and analytical architecture.",
+  "author": {
+    "name": "Guilherme Mourão",
+    "url": "https://github.com/guipmourao"
+  },
+  "homepage": "https://github.com/guipmourao/agents",
+  "repository": "https://github.com/guipmourao/agents",
+  "license": "MIT",
+  "keywords": [
+    "data-engineering",
+    "data-modeling",
+    "dimensional-modeling",
+    "data-warehouse",
+    "analytics-engineering",
+    "etl",
+    "elt",
+    "data-quality"
+  ]
+}

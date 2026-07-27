@@ -1,0 +1,37 @@
+{
+  "name": "agents",
+  "owner": {
+    "name": "Guilherme Mourão",
+    "url": "https://github.com/guipmourao"
+  },
+  "metadata": {
+    "description": "A marketplace of specialized Claude Code plugins for software engineering, data, infrastructure, security, and automation workflows.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "data-engineering",
+      "source": "./plugins/data-engineering",
+      "description": "Data engineering workflows for dimensional modeling, data warehouse design, data quality, ETL, ELT, and analytical architecture.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Guilherme Mourão",
+        "url": "https://github.com/guipmourao"
+      },
+      "homepage": "https://github.com/guipmourao/agents",
+      "repository": "https://github.com/guipmourao/agents",
+      "license": "MIT",
+      "category": "data",
+      "tags": [
+        "data-engineering",
+        "data-modeling",
+        "dimensional-modeling",
+        "data-warehouse",
+        "analytics-engineering",
+        "etl",
+        "elt",
+        "data-quality"
+      ]
+    }
+  ]
+}

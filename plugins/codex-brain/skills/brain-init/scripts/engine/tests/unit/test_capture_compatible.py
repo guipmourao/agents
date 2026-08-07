@@ -69,7 +69,6 @@ def force_compatible_tier(monkeypatch):
     monkeypatch.setattr(
         transaction_module, "capability_for", lambda vault_root: compatible_capability()
     )
-    monkeypatch.setenv(_WINDOWS_WRITE_OPT_IN_ENV_VAR, "1")
 
 
 def test_runtime_entry_exists_and_read_write_path_mode(tmp_path):
@@ -129,7 +128,10 @@ def test_capture_queue_enqueue_and_list_compatible(
     assert listed[0]["id"] == entry["id"]
 
 
-def test_capture_queue_lock_refuses_without_opt_in(monkeypatch, tmp_vault):
+def test_capture_queue_lock_works_without_any_env_var(monkeypatch, tmp_vault):
+    """COMPATIBLE tier is default-on: CODEX_BRAIN_WINDOWS_WRITE is no longer
+    required for CaptureQueueLock either."""
+
     import engine.transaction as transaction_module
     from engine.hostplatform.capability import compatible_capability
 
@@ -137,8 +139,11 @@ def test_capture_queue_lock_refuses_without_opt_in(monkeypatch, tmp_vault):
         transaction_module, "capability_for", lambda vault_root: compatible_capability()
     )
     monkeypatch.delenv(_WINDOWS_WRITE_OPT_IN_ENV_VAR, raising=False)
-    from engine.capture import CaptureValidationError
+    _install_fake_win32(monkeypatch)
 
-    with pytest.raises(CaptureValidationError) as excinfo:
-        CaptureQueueLock(tmp_vault)
-    assert excinfo.value.code == "UNSUPPORTED_PLATFORM"
+    lock = CaptureQueueLock(tmp_vault, timeout=1.0)
+    lock.acquire()
+    try:
+        assert lock.acquired is True
+    finally:
+        lock.release()

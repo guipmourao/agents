@@ -1472,15 +1472,12 @@ class _PlatformConfinementUnavailable(OSError):
 #: Native Windows (COMPATIBLE tier) writes stay behind this env var until the
 #: rollout plan's promotion criteria are met: Windows CI green through a
 #: soak period, deterministic TOCTOU-injection tests, OneDrive/Controlled
-#: Folder Access verified on a real machine, docs updated -- see the
-#: "Rollout faseado" section of the port plan and docs/windows-wsl.md.
-#: Without it, native Windows keeps today's exact behavior: hard refuse,
-#: point to WSL. STRICT tier (POSIX/WSL/macOS) is never gated by this.
+#: Formerly gated native Windows writes behind this env var during rollout.
+#: Promoted to default-on: COMPATIBLE tier is no longer opt-in. Kept as a
+#: name (rather than deleted outright) only because it may still appear in
+#: user shell profiles/CI config from the rollout period; setting it has no
+#: effect either way now.
 _WINDOWS_WRITE_OPT_IN_ENV_VAR = "CODEX_BRAIN_WINDOWS_WRITE"
-
-
-def _windows_write_opted_in() -> bool:
-    return os.environ.get(_WINDOWS_WRITE_OPT_IN_ENV_VAR) == "1"
 
 
 def _require_write_platform(vault_root: Path | str) -> GuaranteeTier:
@@ -1495,17 +1492,8 @@ def _require_write_platform(vault_root: Path | str) -> GuaranteeTier:
     """
 
     tier = capability_for(vault_root).tier
-    if tier is GuaranteeTier.STRICT:
+    if tier is GuaranteeTier.STRICT or tier is GuaranteeTier.COMPATIBLE:
         return tier
-    if tier is GuaranteeTier.COMPATIBLE:
-        if _windows_write_opted_in():
-            return tier
-        raise TransactionValidationError(
-            "UNSUPPORTED_PLATFORM",
-            _UNSUPPORTED_PLATFORM_MESSAGE
-            + " (native Windows support exists but is opt-in while it's "
-            f"rolled out: set {_WINDOWS_WRITE_OPT_IN_ENV_VAR}=1 to use it)",
-        )
     raise TransactionValidationError(
         "UNSAFE_VAULT_IDENTITY",
         f"{canonical(vault_root)} is on a filesystem that cannot host vault writes safely",
@@ -1737,12 +1725,14 @@ class MutationLock:
     # Windows CI run's winerror=87; the vault-root directory handle is still
     # opened for identity checks, just never locked directly).
     #
-    # UNVERIFIED on a real Windows host as of this writing (no Windows CI has
-    # run yet -- see docs/windows-wsl.md and the port plan's phase 8 rollout
-    # rigor). Reachable only behind CODEX_BRAIN_WINDOWS_WRITE=1
-    # (_windows_write_opted_in) -- default behavior on native Windows is
-    # still today's hard refuse until the rollout plan's promotion criteria
-    # are met and that gate is removed.
+    # Verified on real windows-latest CI (docs/windows-wsl.md), not just
+    # mocked win32 -- the mocked suite alone previously missed six real
+    # pywin32/Win32 API-shape bugs a real Windows run then caught. Default-on
+    # as of the promotion decision that removed the CODEX_BRAIN_WINDOWS_WRITE
+    # gate; the soak-period/TOCTOU-test/OneDrive-CFA-dogfood criteria the
+    # original rollout plan listed for that promotion were not all completed
+    # first -- this was an explicit choice to promote on one green CI run
+    # rather than wait, not an oversight.
 
     def _owner_compatible(self, lock_dir: Path) -> dict[str, Any] | None:
         owner_path = lock_dir / "owner.json"

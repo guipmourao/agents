@@ -33,7 +33,7 @@
       "name": "codex-brain",
       "source": "./plugins/codex-brain",
       "description": "Local-first persistent memory plugin for Codex: a vault with transaction-reviewed writes, source/claim provenance ledgers, and onboarding/assistant skills that propose content instead of writing on their own.",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "author": {
         "name": "Guilherme Mourão",
         "email": "guipmourao@gmail.com"

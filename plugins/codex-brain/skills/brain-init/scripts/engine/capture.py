@@ -195,10 +195,10 @@ def _safe_runtime_dir(vault_root: Path) -> Path:
     """Create the capture runtime through a no-follow vault descriptor.
 
     Gated through ``transaction._require_write_platform`` (same tier
-    resolution + ``CODEX_BRAIN_WINDOWS_WRITE`` opt-in as every other write
-    path in this port) instead of capture.py's own ad-hoc platform check, so
-    this and transaction.py's writes can never disagree about what a given
-    vault/host combination is allowed to do.
+    resolution as every other write path in this port) instead of
+    capture.py's own ad-hoc platform check, so this and transaction.py's
+    writes can never disagree about what a given vault/host combination is
+    allowed to do.
     """
 
     root = canonical(vault_root)
@@ -1620,10 +1620,9 @@ class CaptureQueueLock:
 
     def __post_init__(self) -> None:
         self.vault_root = canonical(self.vault_root)
-        # Gates COMPATIBLE tier behind CODEX_BRAIN_WINDOWS_WRITE and refuses
-        # UNSAFE_REFUSED outright, same as every other write path -- if this
-        # doesn't raise, self.runtime is already valid for whichever tier
-        # acquire() below will use.
+        # Refuses UNSAFE_REFUSED outright, same as every other write path --
+        # if this doesn't raise, self.runtime is already valid for whichever
+        # tier acquire() below will use.
         self.runtime = _safe_runtime_dir(self.vault_root)
         self.path = self.runtime / "queue.lock"
         self.owner_path = self.path / "owner.json"

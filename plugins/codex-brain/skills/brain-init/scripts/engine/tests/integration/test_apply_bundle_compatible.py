@@ -71,7 +71,6 @@ def force_compatible_tier(monkeypatch):
     monkeypatch.setattr(
         transaction_module, "capability_for", lambda vault_root: compatible_capability()
     )
-    monkeypatch.setenv(_WINDOWS_WRITE_OPT_IN_ENV_VAR, "1")
 
 
 def _minimal_bundle(operation_id: str, path: str, content: str) -> dict:
@@ -109,16 +108,20 @@ def test_apply_bundle_compatible_tier_idempotent_replay(
     assert first == second
 
 
-def test_apply_bundle_refuses_without_opt_in_env_var(monkeypatch, tmp_vault):
+def test_apply_bundle_compatible_tier_works_without_any_env_var(monkeypatch, tmp_vault):
+    """COMPATIBLE tier is default-on: CODEX_BRAIN_WINDOWS_WRITE is no longer
+    required, and setting it (or not) has no effect on whether this succeeds."""
+
     import engine.transaction as transaction_module
     from engine.hostplatform.capability import compatible_capability
-    from engine.transaction import TransactionValidationError
 
     monkeypatch.setattr(
         transaction_module, "capability_for", lambda vault_root: compatible_capability()
     )
     monkeypatch.delenv(_WINDOWS_WRITE_OPT_IN_ENV_VAR, raising=False)
+    _install_fake_win32(monkeypatch)
     bundle = _minimal_bundle("op-generic-3", "wiki/note3.md", "content\n")
-    with pytest.raises(TransactionValidationError) as excinfo:
-        apply_bundle(tmp_vault, bundle)
-    assert excinfo.value.code == "UNSUPPORTED_PLATFORM"
+
+    result = apply_bundle(tmp_vault, bundle)
+
+    assert result["status"] == "complete"

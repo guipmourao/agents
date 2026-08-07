@@ -66,6 +66,4 @@ jobs:
         run: python -m pytest -q
       - name: Run engine smoke test (init dry-run, apply, lint, hooks)
         shell: bash
-        env:
-          CODEX_BRAIN_WINDOWS_WRITE: "1"
         run: bash plugins/codex-brain/tools/smoke-test.sh

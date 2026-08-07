@@ -4,8 +4,7 @@
 now work two ways on Windows:
 
 - **Native Windows** (NTFS or ReFS, local volume): works directly, behind a
-  one-time `pip install pywin32` and an explicit opt-in env var while this
-  path is rolled out — see "Native Windows setup" below.
+  one-time `pip install pywin32` — see "Native Windows setup" below.
 - **WSL/Linux or supported macOS**: works as it always has, with the
   strongest safety guarantee (see "Guarantee tiers" below).
 
@@ -25,9 +24,9 @@ Every write resolves one of three tiers for the vault's volume:
   by full path and its identity verified immediately afterward instead of
   pinned in advance. This narrows the window where a concurrent replace
   could redirect a write, rather than eliminating it the way STRICT does.
-  Process-exclusivity locking is not degraded — Windows supports locking a
-  directory handle directly, unlike POSIX's directory-`flock` portability
-  quirks.
+  Process-exclusivity locking uses a dedicated lock file inside the vault's
+  metadata directory (`LockFileEx` doesn't accept directory handles on
+  Windows), not the vault root directory itself.
 - **UNSAFE_REFUSED** (FAT/exFAT, unclassified network shares, or an
   unrecognized volume): writes are refused outright, on either platform —
   these filesystems don't expose stable-enough file identity for either
@@ -40,19 +39,13 @@ A completed transaction's journal records which tier produced it.
 1. One-time: `pip install pywin32`. The engine imports it lazily and only
    for mutating operations — nothing else in this codebase depends on it, so
    read-only inspection and dry-runs never need it.
-2. Set `CODEX_BRAIN_WINDOWS_WRITE=1` in the environment before running a
-   mutating command. This gate exists because the COMPATIBLE tier is newer
-   and less exercised than STRICT: without the env var, native Windows keeps
-   refusing writes exactly as before, pointing here. It will eventually be
-   removed once the COMPATIBLE tier has enough real-world track record;
-   until then, set it deliberately, not as a blanket default.
-3. Run the same commands you would inside WSL — `init`, `adopt`,
+2. Run the same commands you would inside WSL — `init`, `adopt`,
    `transaction apply`, `checkpoint` — directly from a native Windows Python.
    Codex Desktop on Windows can now do the write step itself in this mode;
    you no longer need a separate WSL/CLI session just to mutate the vault.
 
-If you'd rather not opt in yet, WSL continues to work exactly as documented
-below, with no setup change.
+WSL continues to work exactly as documented below, with no setup change, if
+you'd rather use it.
 
 ## OneDrive and Controlled Folder Access
 
@@ -82,8 +75,8 @@ error. Fix it by either:
 ## WSL setup (STRICT tier)
 
 The rest of this document covers running the write side inside WSL, which
-gives the STRICT tier and needs no `pywin32`/env var setup. This remains a
-fully supported path, not a fallback.
+gives the STRICT tier and needs no `pywin32` setup. This remains a fully
+supported path, not a fallback.
 
 ### The constraint is about the process, not just the vault path
 
@@ -91,13 +84,12 @@ This is the part that is easy to miss: **the tier is determined by which
 process performs the write, not by where the vault path points.** Pointing
 `--vault` at a WSL path from a Windows-native process does not upgrade you
 to STRICT — the write runs in whatever tier that process's platform
-supports (COMPATIBLE if it's Windows-native and opted in, refused if not
-opted in).
+supports (COMPATIBLE on native Windows, STRICT inside WSL/Linux/macOS).
 
-Concretely: if you are using **Codex Desktop on Windows** without the
-`CODEX_BRAIN_WINDOWS_WRITE=1` opt-in, any skill that calls `--apply` is
-refused there, for any vault, on any path — same as before native Windows
-support existed. Read-only work (`brain-query`, dry-run plans,
+Concretely: a **Codex Desktop on Windows** session on a FAT/exFAT or
+unclassified-network vault still gets refused for any `--apply`-calling
+skill, same as before native Windows support existed — only that specific
+refusal case remains. Read-only work (`brain-query`, dry-run plans,
 `brain-onboarding`'s planning step) is fine from Codex Desktop either way.
 
 The WSL-based working setup is: run a Codex session **inside WSL** (open a
@@ -105,7 +97,7 @@ WSL/Ubuntu terminal, then run `codex` — the CLI, not the Desktop app — from
 there) for `brain-init`'s `--apply`, `brain-save`, `brain-ingest`, and
 anything else that writes. Desktop-on-Windows and CLI-in-WSL can both point
 at the same vault; only the write side has to happen from inside WSL (or,
-now, from a native Windows process with the opt-in set).
+now, from a native Windows process directly).
 
 Confirmed in practice: Codex Desktop's own sandboxed process cannot
 reliably reach WSL at all from inside a session, on either path — a
@@ -118,10 +110,9 @@ assuming WSL is the problem. If Codex Desktop genuinely cannot reach WSL
 on your machine, the practical options are: (1) do the write-side work
 from a Codex CLI session installed and run inside WSL directly (`npm
 install -g @openai/codex`, then `codex login`, then `codex plugin
-marketplace add ...` from a WSL terminal — not from Codex Desktop), (2) use
-native Windows support instead (see above), or (3) keep the vault on a
-native Windows path on that machine and accept that Codex Desktop there is
-read-only for this plugin without the native-write opt-in.
+marketplace add ...` from a WSL terminal — not from Codex Desktop), or
+(2) use native Windows support instead (see above) — `pip install pywin32`
+once, then Codex Desktop itself can do the write.
 
 ### Why STRICT writes require WSL/Linux/macOS
 

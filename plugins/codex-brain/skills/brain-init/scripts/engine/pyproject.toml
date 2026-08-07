@@ -1,6 +1,6 @@
 [project]
 name = "codex-brain-engine"
-version = "2.2.0"
+version = "2.3.0"
 description = "Portable vault-mutation core for codex-brain (dev/test tooling manifest, not a pip-installed runtime dependency)"
 requires-python = ">=3.10"
 dependencies = []

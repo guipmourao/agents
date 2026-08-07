@@ -21,8 +21,7 @@ selection.
 
 Writes (`init --apply`, `adopt --apply`, and everything downstream) work on
 WSL/Linux/macOS as always, and now also work directly on native Windows
-(NTFS/ReFS) behind a one-time `pip install pywin32` and the
-`CODEX_BRAIN_WINDOWS_WRITE=1` opt-in env var — see
+(NTFS/ReFS) behind a one-time `pip install pywin32` — see
 `docs/windows-wsl.md` for setup, the OneDrive/Controlled Folder Access
 notes, and what changes when running from Codex Desktop on Windows.
 

@@ -33,7 +33,7 @@ CONFIG_PATH = PurePosixPath("config/release-allowlist.json")
 MANIFEST_NAME = "RELEASE_MANIFEST.json"
 CHECKSUMS_NAME = "SHA256SUMS"
 GENERATED_NAMES = frozenset({MANIFEST_NAME, CHECKSUMS_NAME})
-PUBLIC_MARKETPLACE_PATH = ".claude-plugin/marketplace.json"
+PUBLIC_MARKETPLACE_PATH = ".agents/plugins/marketplace.json"
 PUBLIC_MARKETPLACE_TEMPLATE = "config/public-marketplace.json"
 
 # ZIP dates cannot represent earlier or later instants.  Requiring rather than
@@ -1859,7 +1859,7 @@ def _validate_public_marketplace(
         )
     template = payload.get(PUBLIC_MARKETPLACE_TEMPLATE)
     marketplace_bytes = payload.get(PUBLIC_MARKETPLACE_PATH)
-    plugin_bytes = payload.get(".claude-plugin/plugin.json")
+    plugin_bytes = payload.get(".codex-plugin/plugin.json")
     if template is None or marketplace_bytes is None or plugin_bytes is None:
         errors.append(
             _error(
@@ -1962,7 +1962,7 @@ def _validate_public_marketplace(
             )
         )
     required = {
-        ".claude-plugin/plugin.json",
+        ".codex-plugin/plugin.json",
         "engine/__init__.py",
         "config/capabilities.json",
         "hooks/hooks.json",

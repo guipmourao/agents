@@ -1,4 +1,4 @@
-"""Thin Claude Code lifecycle adapter for the portable core."""
+"""Lifecycle hook adapter for the portable core (Codex-compatible hook schema)."""
 
 from __future__ import annotations
 
@@ -181,7 +181,7 @@ def session_start_context(
     # requires an explicit user-controlled environment opt-in.
     if env.get("CODEX_BRAIN_SESSION_CONTEXT") != "1":
         return ""
-    project = start or env.get("CLAUDE_PROJECT_DIR") or Path.cwd()
+    project = start or Path.cwd()
     try:
         selection = resolve_vault_root(
             start=project,
@@ -221,7 +221,7 @@ def stop_status(
     plugin_root: Path | str | None = None,
 ) -> str:
     env = os.environ if environ is None else environ
-    project = start or env.get("CLAUDE_PROJECT_DIR") or Path.cwd()
+    project = start or Path.cwd()
     try:
         selection = resolve_vault_root(
             start=project,

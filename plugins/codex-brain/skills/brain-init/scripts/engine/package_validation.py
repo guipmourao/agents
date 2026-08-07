@@ -32,7 +32,7 @@ SESSION_START_MATCHERS = {"startup", "resume", "clear", "compact"}
 PORTABLE_SKILL_KEYS = ("name", "description")
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MARKETPLACE_TEMPLATE = "config/public-marketplace.json"
-MARKETPLACE_PATH = ".claude-plugin/marketplace.json"
+MARKETPLACE_PATH = ".agents/plugins/marketplace.json"
 YAML_PLAIN_FORBIDDEN_START = frozenset("-?:,[]{}#&*!|>'\"%@`")
 
 
@@ -253,12 +253,12 @@ def _validate_skills(root: Path) -> list[dict[str, str]]:
 def _validate_documented_apply_examples(root: Path) -> list[dict[str, str]]:
     """Keep current user-facing core apply examples on the approval workflow."""
 
-    paths = [root / name for name in ("README.md", "CLAUDE.md", "WIKI.md")]
+    paths = [root / name for name in ("README.md", "AGENTS.md", "WIKI.md")]
     paths.extend(sorted((root / "docs").glob("*.md")))
     paths.extend(sorted((root / "skills").glob("**/*.md")))
     findings: list[dict[str, str]] = []
     mutation = re.compile(
-        r"codex-brain\.py\s+(?:init|adopt|migrate|mode\s+set|extension\s+dragonscale|capture\s+apply)\b"
+        r"vault\.py\s+(?:init|adopt|migrate|mode\s+set|extension\s+dragonscale|capture\s+apply)\b"
     )
     for path in paths:
         if not path.is_file():
@@ -416,7 +416,7 @@ def _validate_hooks(root: Path) -> list[dict[str, str]]:
 
 
 def _validate_versions(root: Path) -> list[dict[str, str]]:
-    plugin, errors = _load_json(root, ".claude-plugin/plugin.json")
+    plugin, errors = _load_json(root, ".codex-plugin/plugin.json")
     marketplace, marketplace_errors = _load_json(root, MARKETPLACE_TEMPLATE)
     errors.extend(marketplace_errors)
     if errors:
@@ -431,11 +431,11 @@ def _validate_versions(root: Path) -> list[dict[str, str]]:
     )
     if not isinstance(plugin_name, str) or NAME_RE.fullmatch(plugin_name) is None:
         findings.append(
-            _finding("invalid_plugin_name", ".claude-plugin/plugin.json", "name")
+            _finding("invalid_plugin_name", ".codex-plugin/plugin.json", "name")
         )
     if not isinstance(plugin_version, str) or not plugin_version:
         findings.append(
-            _finding("missing_version", ".claude-plugin/plugin.json", "version")
+            _finding("missing_version", ".codex-plugin/plugin.json", "version")
         )
     elif marketplace_version != plugin_version:
         findings.append(

@@ -26,6 +26,21 @@ terminal, then run `codex` — the CLI, not the Desktop app — from there) for
 that writes. Desktop-on-Windows and CLI-in-WSL can both point at the same
 vault; only the write side has to happen from inside WSL.
 
+Confirmed in practice: Codex Desktop's own sandboxed process cannot
+reliably reach WSL at all from inside a session, on either path — a
+`\\wsl.localhost\...` UNC path and a `wsl.exe` subprocess call both
+failed silently from inside a Codex Desktop session on a machine where
+`wsl -l -v` worked fine from a plain PowerShell window on the same
+machine. This is a sandboxing limitation of Codex Desktop itself, not a
+broken WSL install — verify with the same plain-PowerShell test before
+assuming WSL is the problem. If Codex Desktop genuinely cannot reach WSL
+on your machine, the practical options are: (1) do the write-side work
+from a Codex CLI session installed and run inside WSL directly (`npm
+install -g @openai/codex`, then `codex login`, then `codex plugin
+marketplace add ...` from a WSL terminal — not from Codex Desktop), or
+(2) keep the vault on a native Windows path on that machine and accept
+that Codex Desktop there is read-only for this plugin either way.
+
 ## Why writes require WSL
 
 Mutation safety depends on POSIX directory descriptors: the vault root and

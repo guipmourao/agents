@@ -14,6 +14,17 @@ No write to the user's vault happens outside a reviewed transaction: plan
 (dry-run) -> approved hash -> apply. This applies to every skill in this
 plugin. Never edit vault files directly with generic write tools.
 
+## `codex exec` sandbox mode
+
+Verified against a real `codex exec` session: the default sandbox is
+restrictive enough to block even a dry-run plan from completing, because
+computing the plan's approval hash needs a writable scratch/temp
+directory and the default sandbox is read-only. This is not specific to
+this plugin — any dry-run through `codex exec` without a writable sandbox
+will hit the same wall. Use `codex exec -s workspace-write ...` (or a less
+restrictive `--sandbox` value) when driving this plugin non-interactively,
+or run it through an interactive `codex` session instead.
+
 ## Engine
 
 `skills/brain-init/scripts/vault.py` is the engine's entry point. Resolve

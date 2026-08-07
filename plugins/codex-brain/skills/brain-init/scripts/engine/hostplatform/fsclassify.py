@@ -67,7 +67,14 @@ def classify_volume(volume_root: str) -> VolumeKind:
     if drive_type == win32file.DRIVE_REMOTE:
         return VolumeKind.SMB_NETWORK
     try:
-        _, _, _, _, fs_name = win32file.GetVolumeInformation(volume_root)
+        # GetVolumeInformation is exposed via win32api in pywin32, not
+        # win32file -- confirmed by the second real Windows CI run, which
+        # hit AttributeError: module 'win32file' has no attribute
+        # 'GetVolumeInformation' the first time this code ever ran against
+        # real pywin32.
+        import win32api
+
+        _, _, _, _, fs_name = win32api.GetVolumeInformation(volume_root)
     except Exception as exc:
         print(
             f"codex-brain: cannot classify volume {volume_root!r} "

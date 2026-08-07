@@ -6,13 +6,29 @@
     "url": "https://github.com/guipmourao"
   },
   "metadata": {
-    "description": "A marketplace of specialized plugins (Claude Code and Codex) for software engineering, data, infrastructure, security, automation, and personal memory workflows.",
-    "version": "1.1.0"
+    "description": "A marketplace of specialized Codex plugins for software engineering, data, infrastructure, security, automation, and personal memory workflows.",
+    "version": "1.2.0"
   },
   "interface": {
     "displayName": "agents"
   },
   "plugins": [
+    {
+      "name": "data-engineering",
+      "source": "./plugins/data-engineering",
+      "description": "Data engineering workflows for dimensional modeling, data warehouse design, data quality, ETL, ELT, and analytical architecture.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Guilherme Mourão",
+        "url": "https://github.com/guipmourao"
+      },
+      "homepage": "https://github.com/guipmourao/agents/tree/main/plugins/data-engineering",
+      "category": "Data",
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    },
     {
       "name": "codex-brain",
       "source": "./plugins/codex-brain",

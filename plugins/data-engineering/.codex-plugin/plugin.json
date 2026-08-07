@@ -6,8 +6,8 @@
     "name": "Guilherme Mourão",
     "url": "https://github.com/guipmourao"
   },
-  "homepage": "https://github.com/guipmourao/agents",
-  "repository": "https://github.com/guipmourao/agents",
+  "homepage": "https://github.com/guipmourao/agents/tree/main/plugins/data-engineering",
+  "repository": "https://github.com/guipmourao/agents/tree/main/plugins/data-engineering",
   "license": "MIT",
   "keywords": [
     "data-engineering",
@@ -18,5 +18,11 @@
     "etl",
     "elt",
     "data-quality"
-  ]
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Data Engineering",
+    "shortDescription": "Dimensional modeling, data warehouse design, ETL/ELT, and data quality workflows",
+    "category": "Data"
+  }
 }

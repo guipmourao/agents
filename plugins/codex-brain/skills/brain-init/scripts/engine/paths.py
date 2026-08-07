@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Mapping
 
 from .json_utils import parse_finite_json_float
+from .hostplatform.capability import (
+    PlatformCapability,
+    compatible_capability,
+    strict_capability,
+    unsafe_refused_capability,
+)
 
 WORKSPACE_CONFIG = ".codex-brain.json"
 VAULT_SCHEMA = "codex-brain.workspace.v1"
@@ -124,6 +130,49 @@ def is_name_surrogate(value: os.stat_result) -> bool:
     )
 
 
+# IO_REPARSE_TAG_CLOUD family (OneDrive Files On-Demand and other cloud-sync
+# placeholders). Not exposed by Python's stat module the way the symlink and
+# mount-point tags above are, so hardcoded from the public winnt.h
+# definition: base tag 0x9000101A, sync-state variants distinguished by the
+# low 0xF000 nibble. Unverified against a real Windows/pywin32 host in this
+# development environment -- confirm against the Windows CI job
+# (docs/windows-wsl.md) before relying on it beyond the hydration path it
+# currently guards.
+_IO_REPARSE_TAG_CLOUD_BASE = 0x9000101A
+_IO_REPARSE_TAG_CLOUD_MASK = 0x0000F000
+
+
+def is_cloud_placeholder(value: os.stat_result) -> bool:
+    """True when ``value`` names a cloud-sync placeholder (OneDrive Files
+    On-Demand and similar) not yet hydrated to a real local file.
+
+    Deliberately separate from :func:`is_name_surrogate`: a cloud placeholder
+    carries ``FILE_ATTRIBUTE_REPARSE_POINT`` without redirecting the path the
+    way a symlink or junction does, so folding it into the name-surrogate
+    check would make every file in a synced vault fail closed.
+
+    No caller forces hydration explicitly (as of the port's phase 7): a
+    plain ``os.open()`` without ``FILE_FLAG_OPEN_REPARSE_POINT`` -- which is
+    what every read/write in this codebase already does -- is documented
+    OneDrive behavior to trigger hydration on its own, so the degraded-mode
+    read/write paths already work against a cold placeholder without special
+    handling, just a possibly-slower first touch. This function exists as
+    available infrastructure for a caller that wants to *detect* the
+    placeholder state proactively (e.g. to give a clearer diagnostic on a
+    failed or slow read) once that behavior is verified on a real Windows
+    host with OneDrive actually syncing -- deliberately not wired into a
+    speculative error path without that verification. See docs/windows-wsl.md's
+    OneDrive section and ``hostplatform.windows_backend.remap_write_error``
+    for the sibling Controlled Folder Access handling, which *is* wired in.
+    """
+
+    tag = getattr(value, "st_reparse_tag", 0)
+    if tag == 0:
+        return False
+    unmasked_base = _IO_REPARSE_TAG_CLOUD_BASE & ~_IO_REPARSE_TAG_CLOUD_MASK
+    return (tag & ~_IO_REPARSE_TAG_CLOUD_MASK) == unmasked_base
+
+
 def assert_unaliased_directory(path: str | os.PathLike[str] | Path) -> os.stat_result:
     """lstat ``path`` and fail unless it is a plain, non-redirecting directory.
 
@@ -143,16 +192,43 @@ def assert_unaliased_directory(path: str | os.PathLike[str] | Path) -> os.stat_r
     return value
 
 
-def is_same_object(left: os.stat_result, right: os.stat_result) -> bool:
-    """samestat with a degraded-identity guard.
+def _identity_key(value: object) -> tuple[int, ...] | None:
+    """Return a comparable identity tuple for ``value``, or ``None`` when the
+    identity is degenerate (zero POSIX inode, zero Windows file index) and
+    equality can never be asserted.
 
-    A zero inode (FAT/exFAT, some SMB redirectors) means the filesystem does
-    not expose stable identity, so equality can never be asserted.
+    Accepts a POSIX ``os.stat_result`` (via ``st_dev``/``st_ino``) or a
+    ``hostplatform.windows_backend.WindowsIdentity``-shaped object (duck-typed
+    via ``as_tuple()``/``is_stable()``, so this module never has to import
+    the Windows backend) -- whatever ``is_same_object`` is given.
     """
 
-    if left.st_ino == 0 or right.st_ino == 0:
+    st_dev = getattr(value, "st_dev", None)
+    st_ino = getattr(value, "st_ino", None)
+    if st_dev is not None and st_ino is not None:
+        return None if st_ino == 0 else (st_dev, st_ino)
+    as_tuple = getattr(value, "as_tuple", None)
+    is_stable = getattr(value, "is_stable", None)
+    if callable(as_tuple) and callable(is_stable):
+        return tuple(as_tuple()) if is_stable() else None
+    raise TypeError(f"object does not expose a recognized file identity: {value!r}")
+
+
+def is_same_object(left: object, right: object) -> bool:
+    """True when ``left`` and ``right`` name the same underlying file or
+    directory, given a stable identity -- a degraded-identity guard (samestat
+    plus a zero-identity check) shared across the POSIX and Windows backends.
+
+    A zero POSIX inode (FAT/exFAT, some SMB redirectors) or a zero Windows
+    file index means the filesystem does not expose stable identity, so
+    equality can never be asserted; this returns ``False`` in that case.
+    """
+
+    left_key = _identity_key(left)
+    right_key = _identity_key(right)
+    if left_key is None or right_key is None:
         return False
-    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+    return left_key == right_key
 
 
 def _strict_json_loads(value: str) -> object:
@@ -411,3 +487,28 @@ def resolve_vault_root(
 
     legacy = not (candidate / WORKSPACE_CONFIG).is_file()
     return VaultSelection(root=candidate, source=source, legacy=legacy)
+
+
+def capability_for(vault_root: str | os.PathLike[str] | Path) -> PlatformCapability:
+    """Resolve the write-safety capability for ``vault_root`` on this host.
+
+    The single entry point mutating commands should call instead of checking
+    ``os.name``/``supports_confined_dirfd`` directly -- see
+    ``hostplatform/__init__.py`` for why that dispatch belongs here.
+
+    POSIX: STRICT when dir_fd confinement is available (the existing
+    behavior transaction.py/legacy_lock.py already require); UNSAFE_REFUSED
+    otherwise, same as the current hard refusal.
+    Windows: COMPATIBLE on a classified-safe local volume (NTFS/ReFS);
+    UNSAFE_REFUSED on FAT/exFAT, network shares, or an unclassified volume.
+    """
+
+    if os.name != "nt":
+        return strict_capability() if supports_confined_dirfd() else unsafe_refused_capability()
+
+    from .hostplatform import fsclassify
+
+    kind = fsclassify.classify_path(canonical(vault_root))
+    if kind in (fsclassify.VolumeKind.NTFS_LOCAL, fsclassify.VolumeKind.REFS_LOCAL):
+        return compatible_capability()
+    return unsafe_refused_capability()

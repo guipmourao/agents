@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/skills/brain-init/scripts/vault.py\" hook session-start",
+            "statusMessage": "Loading codex-brain vault context"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/skills/brain-init/scripts/vault.py\" hook stop",
+            "statusMessage": "Checking codex-brain vault transaction state"
+          }
+        ]
+      }
+    ]
+  }
+}

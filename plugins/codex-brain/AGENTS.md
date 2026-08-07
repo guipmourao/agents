@@ -32,6 +32,21 @@ As demais skills (`brain-save`, `brain-ingest`, `brain-query`,
 motor por caminho relativo, assumindo que todas as skills deste plugin
 ficam instaladas como irmas (mesmo diretorio pai em `~/.agents/skills/`).
 
+## Hooks
+
+`hooks/hooks.json` declara dois hooks de ciclo de vida, ambos read-only
+(nunca escrevem no vault):
+
+- `SessionStart` — injeta `wiki/hot.md` no contexto da sessao. **Desligado
+  por padrao**: so ativa se a variavel de ambiente
+  `CODEX_BRAIN_SESSION_CONTEXT=1` estiver definida no ambiente de quem
+  chama — sem isso, emite string vazia. E uma decisao de privacidade
+  deliberada: ler o vault e local, mas colocar esse conteudo dentro de uma
+  sessao hospedada e egress, e egress exige opt-in explicito do usuario.
+- `Stop` — avisa (via `systemMessage`) se sobrou uma transacao incompleta
+  (`mutation.lock` preso, journal em `prepared`/`applying`/
+  `rollback-failed`) que precisa de `transaction recover`.
+
 ## Estrutura de um vault deste plugin
 
 - `wiki/` — conhecimento gerado (paginas, index, log, hot cache, ledgers).

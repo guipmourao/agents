@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lint"
+  short_description: "Deterministic vault health check: dead links, orphans, missing frontmatter"
+  default_prompt: "Check this vault's health and report any issues."

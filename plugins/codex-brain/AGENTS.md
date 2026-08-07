@@ -26,9 +26,10 @@ python3 skills/brain-init/scripts/vault.py --help
 
 The other skills (`brain-save`, `brain-ingest`, `brain-query`,
 `brain-onboarding`, `brain-new-person`, `brain-new-project`,
-`brain-write-like-me`, `brain-assistant`, `brain-loop`) resolve the same
-engine via a relative path, assuming every skill in this plugin is
-installed as siblings (same parent directory under `~/.agents/skills/`).
+`brain-write-like-me`, `brain-assistant`, `brain-loop`, `brain-lint`)
+resolve the same engine via a relative path, assuming every skill in this
+plugin is installed as siblings (same parent directory under
+`~/.agents/skills/`).
 
 ## Hooks
 
@@ -77,3 +78,5 @@ ever writes to the vault):
 - `skills/brain-loop/` — design a recurring check orchestrated by an
   external scheduler (`codex exec` via cron); never applies a write
   unattended.
+- `skills/brain-lint/` — deterministic vault health check (dead links,
+  orphans, missing frontmatter, provenance errors); read-only.

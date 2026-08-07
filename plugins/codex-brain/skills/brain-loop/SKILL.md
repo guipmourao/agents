@@ -39,6 +39,18 @@ command and the check's scope; it does not install a cron entry on the
 user's behalf without a separate, explicit request to do so, since that
 changes system state outside the vault.
 
+## What has actually been verified
+
+The orchestration mechanics were tested end-to-end with a real `cron`
+entry: an externally-scheduled job invoked the engine's read-only
+`hook session-start` against a real vault and produced a bounded report
+without ever touching a write path — proving the "external scheduler
+calls a bounded, read-only check" pattern genuinely works, not just in
+theory. What is still unverified is `codex exec` itself, since no Codex
+CLI was available in the environment this plugin was built in — draft
+the exact command with the user and have them confirm it runs as
+expected in their own environment before relying on it unattended.
+
 ## Hard boundary
 
 A scheduled run may only read and report. If a scheduled check finds

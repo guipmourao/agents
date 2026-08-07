@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate JSON syntax of every manifest
+        run: |
+          set -euo pipefail
+          find . -type f \( \
+            -name "plugin.json" -o \
+            -name "marketplace.json" -o \
+            -name "hooks.json" -o \
+            -name "*.app.json" -o \
+            -name "*.mcp.json" \
+          \) -not -path "./.git/*" -print0 |
+          while IFS= read -r -d '' file; do
+            echo "checking $file"
+            python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$file"
+          done
+
+      - name: Check marketplace.json is in sync with each plugin.json
+        run: python3 tools/check-marketplace-sync.py
+
+  codex-brain-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run engine smoke test (init dry-run, apply, lint, hooks)
+        run: bash plugins/codex-brain/tools/smoke-test.sh

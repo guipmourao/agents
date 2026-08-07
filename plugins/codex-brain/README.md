@@ -24,6 +24,7 @@ follows internally.
 | `brain-new-project` | Bootstrap a new project or experiment |
 | `brain-write-like-me` | Extract a writing-style profile from approved samples |
 | `brain-loop` | Design a recurring check orchestrated by an external scheduler |
+| `brain-lint` | Deterministic vault health check: dead links, orphans, missing frontmatter (read-only) |
 
 ## Hooks
 

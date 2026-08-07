@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vault Init"
+  short_description: "Initialize a new vault or adopt an existing directory as a codex-brain"
+  default_prompt: "Set up a new vault here, or adopt this directory as one."

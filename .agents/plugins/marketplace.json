@@ -1,0 +1,33 @@
+{
+  "name": "agents",
+  "owner": {
+    "name": "Guilherme Mourão",
+    "email": "guipmourao@gmail.com",
+    "url": "https://github.com/guipmourao"
+  },
+  "metadata": {
+    "description": "A marketplace of specialized plugins (Claude Code and Codex) for software engineering, data, infrastructure, security, automation, and personal memory workflows.",
+    "version": "1.1.0"
+  },
+  "interface": {
+    "displayName": "agents"
+  },
+  "plugins": [
+    {
+      "name": "codex-brain",
+      "source": "./plugins/codex-brain",
+      "description": "Local-first persistent memory plugin: a vault with transaction-reviewed writes, source/claim provenance ledgers, and onboarding/assistant skills that propose content instead of writing on their own.",
+      "version": "0.1.1",
+      "author": {
+        "name": "Guilherme Mourão",
+        "email": "guipmourao@gmail.com"
+      },
+      "homepage": "https://github.com/guipmourao/agents/tree/main/plugins/codex-brain",
+      "category": "Productivity",
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    }
+  ]
+}

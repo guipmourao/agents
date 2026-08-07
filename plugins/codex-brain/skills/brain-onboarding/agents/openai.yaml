@@ -1,0 +1,4 @@
+interface:
+  display_name: "Onboarding"
+  short_description: "First-run vault setup and proactive people/project proposals"
+  default_prompt: "Onboard me on this vault."

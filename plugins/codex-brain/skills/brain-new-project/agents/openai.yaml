@@ -1,0 +1,4 @@
+interface:
+  display_name: "New Project"
+  short_description: "Bootstrap a new project or experiment directory"
+  default_prompt: "Start a new project in this vault."

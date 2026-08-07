@@ -1,0 +1,4 @@
+interface:
+  display_name: "Query"
+  short_description: "Answer using only existing vault knowledge, read-only"
+  default_prompt: "What does the vault know about this?"

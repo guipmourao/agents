@@ -1,0 +1,24 @@
+/* Minimal, local-only color tokens for the generated vault. */
+:root {
+  --codex-brain-knowledge: #4fc1ff;
+  --codex-brain-source: #6a9955;
+  --codex-brain-entity: #c586c0;
+  --codex-brain-meta: #569cd6;
+}
+
+.nav-folder-title[data-path="wiki"],
+.nav-folder-title[data-path^="wiki/meta"] {
+  color: var(--codex-brain-meta);
+}
+
+.nav-folder-title[data-path^="wiki/concepts"] {
+  color: var(--codex-brain-knowledge);
+}
+
+.nav-folder-title[data-path^="wiki/sources"] {
+  color: var(--codex-brain-source);
+}
+
+.nav-folder-title[data-path^="wiki/entities"] {
+  color: var(--codex-brain-entity);
+}

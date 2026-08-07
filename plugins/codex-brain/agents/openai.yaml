@@ -1,0 +1,4 @@
+interface:
+  display_name: "codex-brain"
+  short_description: "Persistent, transaction-reviewed memory vault for Codex"
+  default_prompt: "Onboard this vault, or save/ingest/query something specific I ask about."

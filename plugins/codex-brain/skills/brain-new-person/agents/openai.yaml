@@ -1,0 +1,4 @@
+interface:
+  display_name: "New Person"
+  short_description: "Create or update a person note under people/"
+  default_prompt: "Add a person note for someone I mention."

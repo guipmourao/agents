@@ -1,0 +1,4 @@
+interface:
+  display_name: "Save"
+  short_description: "Persist a specific conversation result into the vault"
+  default_prompt: "Save this into the vault."

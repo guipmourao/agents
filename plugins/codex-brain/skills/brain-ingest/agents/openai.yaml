@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ingest"
+  short_description: "Turn a supplied source into grounded, cited vault pages"
+  default_prompt: "Ingest this source into the vault."

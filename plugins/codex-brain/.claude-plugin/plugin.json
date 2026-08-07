@@ -1,0 +1,20 @@
+{
+  "name": "codex-brain",
+  "version": "0.1.1",
+  "description": "Local-first persistent memory plugin: a vault with transaction-reviewed writes, source/claim provenance ledgers, and onboarding/assistant skills that propose content instead of writing on their own.",
+  "author": {
+    "name": "Guilherme Mourão",
+    "email": "guipmourao@gmail.com"
+  },
+  "homepage": "https://github.com/guipmourao/agents/tree/main/plugins/codex-brain",
+  "repository": "https://github.com/guipmourao/agents/tree/main/plugins/codex-brain",
+  "keywords": [
+    "vault",
+    "memory",
+    "notes",
+    "knowledge-management",
+    "provenance",
+    "transactions",
+    "second-brain"
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Assistant"
+  short_description: "Ongoing work support after onboarding: context, drafts, next steps"
+  default_prompt: "What should I know before we continue?"

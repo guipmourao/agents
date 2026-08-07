@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write Like Me"
+  short_description: "Bootstrap a personal writing-style profile from approved samples"
+  default_prompt: "Learn my writing style from approved samples."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Loop"
+  short_description: "Design a recurring, externally-scheduled vault check"
+  default_prompt: "Set up a recurring check for this."

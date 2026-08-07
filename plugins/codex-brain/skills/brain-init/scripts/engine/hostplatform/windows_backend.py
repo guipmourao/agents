@@ -167,12 +167,21 @@ def try_acquire_exclusive(handle: DirectoryHandle) -> bool:
             0xFFFFFFFFFFFFFFFF,
             overlapped,
         )
-    except pywintypes.error:
-        # The expected "someone else holds this lock" outcome. Deliberately
-        # not a bare `except Exception`: a wrong parameter (TypeError from a
-        # signature mismatch, say) must not be silently treated as ordinary
-        # contention -- that would retry forever and hide the real bug
-        # behind a generic timeout instead of surfacing it.
+    except pywintypes.error as exc:
+        # The expected "someone else holds this lock" outcome is
+        # winerror==33 (ERROR_LOCK_VIOLATION). Anything else caught here is
+        # still a pywintypes.error (so it can't be told apart from real
+        # contention by type alone), but printing it means a genuine bug --
+        # e.g. locking not being supported at all on a directory handle --
+        # shows up in CI logs instead of just timing out silently, the same
+        # blind-timeout failure mode the fourth real Windows CI run hit.
+        import sys
+
+        print(
+            f"codex-brain: LockFileEx failed on {handle.path!r}: "
+            f"winerror={getattr(exc, 'winerror', None)!r} {exc!r}",
+            file=sys.stderr,
+        )
         return False
     return True
 

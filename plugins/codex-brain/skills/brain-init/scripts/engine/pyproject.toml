@@ -1,0 +1,15 @@
+[project]
+name = "codex-brain-engine"
+version = "2.1.0"
+description = "Portable vault-mutation core for codex-brain (dev/test tooling manifest, not a pip-installed runtime dependency)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# Only needed on native Windows, and only for mutating operations. Imported
+# lazily by platform.windows_backend so POSIX hosts never require this.
+windows = ["pywin32>=306; sys_platform == 'win32'"]
+dev = ["pytest>=8", "pytest-cov"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

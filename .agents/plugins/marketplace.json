@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "A marketplace of specialized Codex plugins for software engineering, data, infrastructure, security, automation, and personal memory workflows.",
-    "version": "1.2.0"
+    "version": "1.3.0"
   },
   "interface": {
     "displayName": "agents"
@@ -17,7 +17,7 @@
       "name": "data-engineering",
       "source": "./plugins/data-engineering",
       "description": "Data engineering workflows for dimensional modeling, data warehouse design, data quality, ETL, ELT, and analytical architecture.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "Guilherme Mourão",
         "url": "https://github.com/guipmourao"
@@ -33,7 +33,7 @@
       "name": "codex-brain",
       "source": "./plugins/codex-brain",
       "description": "Local-first persistent memory plugin: a vault with transaction-reviewed writes, source/claim provenance ledgers, and onboarding/assistant skills that propose content instead of writing on their own.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "author": {
         "name": "Guilherme Mourão",
         "email": "guipmourao@gmail.com"

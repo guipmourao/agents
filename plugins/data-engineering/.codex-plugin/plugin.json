@@ -1,6 +1,6 @@
 {
   "name": "data-engineering",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Data engineering workflows for dimensional modeling, data warehouse design, data quality, ETL, ELT, and analytical architecture.",
   "author": {
     "name": "Guilherme Mourão",
@@ -21,7 +21,7 @@
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "Data Engineering",
+    "displayName": "Codex Data Engineering",
     "shortDescription": "Dimensional modeling, data warehouse design, ETL/ELT, and data quality workflows",
     "category": "Data"
   }

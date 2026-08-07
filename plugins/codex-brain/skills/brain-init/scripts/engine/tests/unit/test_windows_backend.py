@@ -47,14 +47,20 @@ def _install_fake_win32(monkeypatch, *, create_file_raises=None, get_info_raises
         # (attrs, ctime, atime, mtime, volSerial, sizeHigh, sizeLow, nlinks, idxHigh, idxLow)
         return (0, None, None, None, 111, 0, 0, 1, 222, 333)
 
-    def _lock_file_ex(handle, flags, reserved, nNumberOfBytesToLock, overlapped):
-        # Real pywin32 signature is 5 positional args (a single combined
-        # byte-count, not separate low/high DWORDs) -- a strict arity here is
-        # what would have caught the third real Windows CI run's
-        # "TypeError: LockFileEx() takes exactly 5 arguments (6 given)".
+    def _lock_file_ex(handle, flags, nBytesToLockLow, nBytesToLockHigh, overlapped):
+        # Real pywin32 signature is 5 positional args, dropping the raw
+        # Win32 API's dwReserved but keeping the low/high DWORD split -- a
+        # strict arity+range here is what would have caught the third real
+        # Windows CI run's "TypeError: takes exactly 5 arguments (6 given)"
+        # and the fourth run's "winerror=87 ERROR_INVALID_PARAMETER" (a
+        # 64-bit value crammed into the 32-bit high DWORD).
+        assert 0 <= nBytesToLockLow <= 0xFFFFFFFF
+        assert 0 <= nBytesToLockHigh <= 0xFFFFFFFF
         return None
 
-    def _unlock_file_ex(handle, reserved, nNumberOfBytesToLock, overlapped):
+    def _unlock_file_ex(handle, nBytesToUnlockLow, nBytesToUnlockHigh, overlapped):
+        assert 0 <= nBytesToUnlockLow <= 0xFFFFFFFF
+        assert 0 <= nBytesToUnlockHigh <= 0xFFFFFFFF
         return None
 
     fake_win32file = types.SimpleNamespace(

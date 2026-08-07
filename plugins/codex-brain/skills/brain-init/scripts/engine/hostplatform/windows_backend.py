@@ -155,16 +155,20 @@ def try_acquire_exclusive(handle: DirectoryHandle) -> bool:
 
     overlapped = pywintypes.OVERLAPPED()
     try:
-        # pywin32's LockFileEx takes a single combined byte-count arg, not
-        # separate low/high DWORDs like the raw Win32 API -- confirmed by the
-        # third real Windows CI run, which hit
+        # pywin32's LockFileEx drops the raw Win32 API's dwReserved param
+        # (5 args: hFile, dwFlags, nBytesToLockLow, nBytesToLockHigh,
+        # overlapped) but keeps the low/high DWORD split -- confirmed by two
+        # real Windows CI runs in sequence: the third hit
         # "TypeError: LockFileEx() takes exactly 5 arguments (6 given)"
-        # against the 6-arg (low, high split) call this used to make.
+        # against the original 6-arg (reserved + low + high) call, and the
+        # fourth hit "winerror=87 (ERROR_INVALID_PARAMETER)" against a wrong
+        # first fix that kept a reserved-0 slot and crammed a 64-bit value
+        # into what pywin32 actually treats as the 32-bit high DWORD.
         win32file.LockFileEx(
             handle.handle,
             win32con.LOCKFILE_EXCLUSIVE_LOCK | win32con.LOCKFILE_FAIL_IMMEDIATELY,
-            0,
-            0xFFFFFFFFFFFFFFFF,
+            0xFFFFFFFF,
+            0xFFFFFFFF,
             overlapped,
         )
     except pywintypes.error as exc:
@@ -190,8 +194,9 @@ def release_exclusive(handle: DirectoryHandle) -> None:
     win32file = _win32file()
     import pywintypes
 
-    # Same combined-byte-count signature as LockFileEx above (4 args, not 5).
-    win32file.UnlockFileEx(handle.handle, 0, 0xFFFFFFFFFFFFFFFF, pywintypes.OVERLAPPED())
+    # Same dwReserved-dropped, low/high-DWORD-split signature as LockFileEx
+    # above (4 args: hFile, nBytesLow, nBytesHigh, overlapped).
+    win32file.UnlockFileEx(handle.handle, 0xFFFFFFFF, 0xFFFFFFFF, pywintypes.OVERLAPPED())
 
 
 def final_path_for_handle(handle: DirectoryHandle) -> Path:

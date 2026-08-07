@@ -42,3 +42,30 @@ jobs:
           python-version: "3.12"
       - name: Run engine smoke test (init dry-run, apply, lint, hooks)
         run: bash plugins/codex-brain/tools/smoke-test.sh
+
+  codex-brain-windows-tests:
+    # Validates the COMPATIBLE (native Windows) write tier for real. Every
+    # test in engine/tests/unit and engine/tests/integration that exercises
+    # that tier does so against a mocked win32file/win32con/pywintypes on
+    # Linux everywhere else in this repo's dev/CI -- only a real
+    # windows-latest runner with real pywin32 proves those primitives
+    # (CreateFileW/LockFileEx/GetFileInformationByHandle) actually behave the
+    # way the mocks assume. This is a blocking gate for trusting the
+    # COMPATIBLE tier, per the port plan's rollout rigor -- see
+    # plugins/codex-brain/skills/brain-init/docs/windows-wsl.md.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install pytest pywin32
+      - name: Run engine test suite (unit + integration)
+        working-directory: plugins/codex-brain/skills/brain-init/scripts/engine
+        run: python -m pytest -q
+      - name: Run engine smoke test (init dry-run, apply, lint, hooks)
+        shell: bash
+        env:
+          CODEX_BRAIN_WINDOWS_WRITE: "1"
+        run: bash plugins/codex-brain/tools/smoke-test.sh

@@ -30,12 +30,14 @@ from .paths import (
     assert_unaliased_directory,
     assert_within,
     canonical,
+    capability_for,
     directory_open_flags,
     is_name_surrogate,
     is_same_object,
     read_open_flags,
     supports_confined_dirfd,
 )
+from .hostplatform.capability import GuaranteeTier
 
 
 BUNDLE_SCHEMA = "codex-brain.transaction.v1"
@@ -472,20 +474,31 @@ def _assert_no_existing_portable_alias(
     vault_root: Path,
     relative: str,
     *,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> None:
-    """Reject an existing sibling whose NFC(casefold) identity aliases a path."""
+    """Reject an existing sibling whose NFC(casefold) identity aliases a path.
+
+    ``root_fd``/``meta_fd`` are a POSIX dir_fd (STRICT tier), a ``Path``
+    (COMPATIBLE tier -- native Windows inside a held ``MutationLock``, where
+    ``_RuntimeStore``'s fds are paths, not descriptors), or ``None``
+    (standalone caller, e.g. dry-run/inspect). A ``Path`` is treated exactly
+    like the already-existing degraded/no-dirfd branch below: it gets the
+    same per-component ``assert_unaliased_directory`` re-check, since there
+    is no kernel-pinned descriptor to lean on either way.
+    """
 
     normalized = (
         _normalize_vault_path(relative)
-        if root_fd is not None
+        if isinstance(root_fd, int)
         else _safe_vault_path(vault_root, relative)[0]
     )
     flags = directory_open_flags()
     handle: int | Path
-    if root_fd is not None:
+    if isinstance(root_fd, int):
         handle = os.dup(root_fd)
+    elif isinstance(root_fd, Path):
+        handle = root_fd
     elif _supports_confined_dirfd():
         try:
             handle = os.open(vault_root, flags)
@@ -566,15 +579,19 @@ def _safe_hash(
     vault_root: Path,
     relative: str,
     *,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> str | None:
-    if root_fd is None:
+    # A Path root_fd (COMPATIBLE tier -- native Windows inside a held
+    # MutationLock) takes the same degraded/path-validated branch as
+    # root_fd=None below: there is no dir_fd to confine the open with either
+    # way, so _open_parent_directory (STRICT-only) is never reached for it.
+    if not isinstance(root_fd, int):
         normalized, path = _safe_vault_path(vault_root, relative)
     else:
         normalized = _normalize_vault_path(relative)
         path = vault_root.joinpath(*PurePosixPath(normalized).parts)
-    if root_fd is None and not _supports_confined_dirfd():
+    if isinstance(root_fd, Path) or (root_fd is None and not _supports_confined_dirfd()):
         try:
             metadata = path.lstat()
         except FileNotFoundError:
@@ -638,12 +655,17 @@ def _safe_file_state(
     relative: str,
     *,
     max_bytes: int | None = None,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> tuple[str | None, int | None]:
-    """Read one regular file's digest and permission mode from one descriptor."""
+    """Read one regular file's digest and permission mode from one descriptor.
 
-    if root_fd is None:
+    A ``Path`` ``root_fd`` (COMPATIBLE tier) takes the degraded/path-based
+    branch below, same as ``root_fd=None`` on a host without dir_fd support
+    -- ``_open_parent_directory`` is STRICT-tier-only.
+    """
+
+    if not isinstance(root_fd, int):
         normalized, path = _safe_vault_path(vault_root, relative)
     else:
         normalized = _normalize_vault_path(relative)
@@ -651,7 +673,7 @@ def _safe_file_state(
     descriptor = -1
     parent_descriptor = -1
     try:
-        if root_fd is not None or _supports_confined_dirfd():
+        if isinstance(root_fd, int) or (root_fd is None and _supports_confined_dirfd()):
             try:
                 parent_descriptor, leaf = _open_parent_directory(
                     vault_root,
@@ -730,17 +752,21 @@ def read_vault_regular(
     *,
     limit: int = 8 * 1024 * 1024,
     missing_ok: bool = True,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> bytes | None:
-    """Read one bounded regular file through a no-follow vault-relative path."""
+    """Read one bounded regular file through a no-follow vault-relative path.
+
+    A ``Path`` ``root_fd`` (COMPATIBLE tier) takes the degraded/path-based
+    branch below, same as ``root_fd=None`` on a host without dir_fd support.
+    """
 
     if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
         raise TransactionValidationError(
             "INVALID_READ_LIMIT", "read limit must be positive"
         )
     root = canonical(vault_root)
-    if root_fd is None:
+    if not isinstance(root_fd, int):
         normalized, path = _safe_vault_path(root, relative)
     else:
         normalized = _normalize_vault_path(relative)
@@ -748,7 +774,7 @@ def read_vault_regular(
     descriptor = -1
     parent_descriptor = -1
     try:
-        if root_fd is not None or _supports_confined_dirfd():
+        if isinstance(root_fd, int) or (root_fd is None and _supports_confined_dirfd()):
             try:
                 parent_descriptor, leaf = _open_parent_directory(
                     root,
@@ -831,17 +857,21 @@ def _atomic_vault_write(
     data: bytes,
     *,
     mode: int | None,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> None:
-    """Atomically replace a target through a no-follow vault-relative directory FD."""
+    """Atomically replace a target through a no-follow vault-relative directory FD.
 
-    if root_fd is None:
+    A ``Path`` ``root_fd`` (COMPATIBLE tier) takes the degraded/path-based
+    branch below, same as ``root_fd=None`` on a host without dir_fd support.
+    """
+
+    if not isinstance(root_fd, int):
         normalized, target = _safe_vault_path(vault_root, relative)
     else:
         normalized = _normalize_vault_path(relative)
         target = vault_root.joinpath(*PurePosixPath(normalized).parts)
-    if root_fd is None and not _supports_confined_dirfd():
+    if isinstance(root_fd, Path) or (root_fd is None and not _supports_confined_dirfd()):
         _ensure_safe_parent(vault_root, normalized)
         _safe_vault_path(vault_root, normalized)
         atomic_write(target, data, mode=mode)
@@ -894,8 +924,8 @@ def _confined_vault_unlink(
     relative: str,
     *,
     expected_sha256: str,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> None:
     """Unlink one regular file without following a swapped parent path.
 
@@ -903,14 +933,15 @@ def _confined_vault_unlink(
     transaction wrote.  On platforms with directory-FD support, both the
     verification and unlink are anchored to a directory opened from the vault
     root.  The fallback repeats all path checks immediately before unlinking.
+    A ``Path`` ``root_fd`` (COMPATIBLE tier) takes that same fallback branch.
     """
 
-    if root_fd is None:
+    if not isinstance(root_fd, int):
         normalized, target = _safe_vault_path(vault_root, relative)
     else:
         normalized = _normalize_vault_path(relative)
         target = vault_root.joinpath(*PurePosixPath(normalized).parts)
-    if root_fd is None and not _supports_confined_dirfd():
+    if isinstance(root_fd, Path) or (root_fd is None and not _supports_confined_dirfd()):
         metadata = target.lstat()
         if not stat.S_ISREG(metadata.st_mode):
             raise TransactionRecoveryError(
@@ -918,7 +949,7 @@ def _confined_vault_unlink(
                 f"rollback target is not a regular file: {normalized}",
             )
         if (
-            _safe_hash(vault_root, normalized, root_fd=root_fd, meta_fd=meta_fd)
+            _safe_hash(vault_root, normalized, root_fd=None, meta_fd=None)
             != expected_sha256
         ):
             raise TransactionRecoveryError(
@@ -1209,14 +1240,22 @@ def _require_stable_identity(value: os.stat_result, path: Path) -> None:
 
 
 def _vault_object_identity(
-    vault_root: Path | str, *, root_fd: int | None = None
+    vault_root: Path | str, *, root_fd: int | Path | None = None
 ) -> dict[str, Any]:
-    """Return a stable identity for an existing vault or its absent-root slot."""
+    """Return a stable identity for an existing vault or its absent-root slot.
+
+    A ``Path`` ``root_fd`` (COMPATIBLE tier, e.g. ``_RuntimeStore.root_fd``
+    inside a held Windows ``MutationLock``) has no descriptor to ``fstat`` --
+    it takes the same ``_path_mode_identity`` path as ``root_fd=None`` on a
+    host without dir_fd support, evaluated at the pinned root path itself
+    rather than re-deriving ``vault`` from scratch (they're the same path by
+    construction, but this makes that explicit rather than assumed).
+    """
 
     vault = canonical(vault_root)
-    if root_fd is not None:
+    if isinstance(root_fd, int):
         return _identity_from_stat(os.fstat(root_fd))
-    if not _supports_confined_dirfd():
+    if isinstance(root_fd, Path) or not _supports_confined_dirfd():
         return _path_mode_identity(vault)
     try:
         descriptor = os.open(
@@ -1323,10 +1362,17 @@ def _fsync_directory(path: Path) -> None:
 
 
 def atomic_write(path: Path, data: bytes, *, mode: int | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.txn-", dir=path.parent
-    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.txn-", dir=path.parent
+        )
+    except OSError as exc:
+        if os.name == "nt":
+            from .hostplatform import windows_backend
+
+            raise windows_backend.remap_write_error(path, exc) from exc
+        raise
     temp = Path(temp_name)
     try:
         with os.fdopen(descriptor, "wb") as handle:
@@ -1337,6 +1383,12 @@ def atomic_write(path: Path, data: bytes, *, mode: int | None = None) -> None:
             os.chmod(temp, mode)
         os.replace(temp, path)
         _fsync_directory(path.parent)
+    except OSError as exc:
+        if os.name == "nt":
+            from .hostplatform import windows_backend
+
+            raise windows_backend.remap_write_error(path, exc) from exc
+        raise
     finally:
         temp.unlink(missing_ok=True)
 
@@ -1367,18 +1419,14 @@ def _require_lock_dirfd_support() -> None:
     """Fail closed unless the host supplies the dirfd primitives locks need.
 
     WSL/Linux and supported macOS Python builds provide this set.  Native
-    Windows does not, so callers must use WSL rather than silently falling back
-    to path-based lock operations that can follow a concurrently swapped alias.
+    Windows does not (yet, at this point in the port -- see phase 4g), so
+    callers must use WSL rather than silently falling back to path-based lock
+    operations that can follow a concurrently swapped alias.
     """
 
-    required = (os.open, os.mkdir, os.stat, os.unlink, os.rmdir, os.rename)
-    if (
-        os.name == "nt"
-        or not getattr(os, "O_DIRECTORY", 0)
-        or not getattr(os, "O_NOFOLLOW", 0)
-        or any(function not in os.supports_dir_fd for function in required)
-        or os.stat not in os.supports_follow_symlinks
-    ):
+    from .hostplatform import posix_backend
+
+    if not posix_backend.supports_transaction_lock_dirfd():
         raise _PlatformConfinementUnavailable(
             errno.ENOTSUP,
             "directory-descriptor lock confinement requires WSL/Linux or supported macOS",
@@ -1403,19 +1451,47 @@ class _PlatformConfinementUnavailable(OSError):
     """
 
 
-def _require_write_platform() -> None:
-    """Refuse vault mutation on hosts without dirfd confinement, cleanly.
+#: Native Windows (COMPATIBLE tier) writes stay behind this env var until the
+#: rollout plan's promotion criteria are met: Windows CI green through a
+#: soak period, deterministic TOCTOU-injection tests, OneDrive/Controlled
+#: Folder Access verified on a real machine, docs updated -- see the
+#: "Rollout faseado" section of the port plan and docs/windows-wsl.md.
+#: Without it, native Windows keeps today's exact behavior: hard refuse,
+#: point to WSL. STRICT tier (POSIX/WSL/macOS) is never gated by this.
+_WINDOWS_WRITE_OPT_IN_ENV_VAR = "CODEX_BRAIN_WINDOWS_WRITE"
+
+
+def _windows_write_opted_in() -> bool:
+    return os.environ.get(_WINDOWS_WRITE_OPT_IN_ENV_VAR) == "1"
+
+
+def _require_write_platform(vault_root: Path | str) -> GuaranteeTier:
+    """Resolve and validate the write tier for ``vault_root``, or raise.
 
     Called before any side effect (directory creation, backup staging) so a
-    refused ``--apply`` leaves nothing behind.
+    refused write leaves nothing behind -- both by the top-level entry
+    points (``apply_bundle``, ``cli.py``'s init/adopt apply path) and by
+    ``MutationLock.acquire()`` itself, so the two can never disagree about
+    what this vault is allowed to do. Returns the resolved tier so
+    ``MutationLock.acquire()`` doesn't need to recompute ``capability_for``.
     """
 
-    try:
-        _require_lock_dirfd_support()
-    except _PlatformConfinementUnavailable as exc:
+    tier = capability_for(vault_root).tier
+    if tier is GuaranteeTier.STRICT:
+        return tier
+    if tier is GuaranteeTier.COMPATIBLE:
+        if _windows_write_opted_in():
+            return tier
         raise TransactionValidationError(
-            "UNSUPPORTED_PLATFORM", _UNSUPPORTED_PLATFORM_MESSAGE
-        ) from exc
+            "UNSUPPORTED_PLATFORM",
+            _UNSUPPORTED_PLATFORM_MESSAGE
+            + " (native Windows support exists but is opt-in while it's "
+            f"rolled out: set {_WINDOWS_WRITE_OPT_IN_ENV_VAR}=1 to use it)",
+        )
+    raise TransactionValidationError(
+        "UNSAFE_VAULT_IDENTITY",
+        f"{canonical(vault_root)} is on a filesystem that cannot host vault writes safely",
+    )
 
 
 def _open_lock_parent_fd(
@@ -1434,17 +1510,18 @@ def _open_lock_parent_fd(
 
 
 def _open_lock_root_fd(vault_root: Path) -> int:
-    """Pin the canonical vault directory itself without following an alias."""
+    """Pin the canonical vault directory itself without following an alias.
+
+    POSIX-only for now (phase 4a of the Windows port moved the walk itself
+    into ``hostplatform.posix_backend`` for reuse, but ``MutationLock``'s body
+    still performs its own raw dir_fd calls directly -- Windows support for
+    this whole chain lands together in phase 4d/4g, not incrementally here).
+    """
 
     _require_lock_dirfd_support()
-    flags = (
-        os.O_RDONLY
-        | os.O_DIRECTORY
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    return os.open(canonical(vault_root), flags)
+    from .hostplatform import posix_backend
+
+    return posix_backend.open_lock_root_fd(canonical(vault_root))
 
 
 def _open_lock_parent_from_root_fd(
@@ -1455,96 +1532,55 @@ def _open_lock_parent_from_root_fd(
 ) -> int:
     """Walk a runtime directory chain from a retained vault-root descriptor."""
 
-    flags = (
-        os.O_RDONLY
-        | os.O_DIRECTORY
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    current = os.dup(root_fd)
-    try:
-        for component in components:
-            if create:
-                try:
-                    os.mkdir(component, mode=0o700, dir_fd=current)
-                    try:
-                        os.fsync(current)
-                    except OSError:
-                        pass
-                except FileExistsError:
-                    pass
-            following = os.open(component, flags, dir_fd=current)
-            os.close(current)
-            current = following
-        return current
-    except BaseException:
-        os.close(current)
-        raise
+    from .hostplatform import posix_backend
+
+    return posix_backend.open_lock_parent_from_root_fd(root_fd, components, create=create)
 
 
 def _try_vault_advisory_lock(root_fd: int) -> bool:
-    """Try to serialize the vault inode across runtime namespace replacement."""
+    """Try to serialize the vault inode across runtime namespace replacement.
 
-    try:
-        fcntl_module = __import__("fcntl")
-        lock_ex = int(getattr(fcntl_module, "LOCK_EX"))
-        lock_nb = int(getattr(fcntl_module, "LOCK_NB"))
-        flock = getattr(fcntl_module, "flock")
-    except (ImportError, AttributeError, TypeError, ValueError) as exc:
-        raise OSError(
-            errno.ENOTSUP,
-            "process-lifetime vault locking requires fcntl.flock on WSL/Linux or macOS",
-        ) from exc
-    try:
-        flock(root_fd, lock_ex | lock_nb)
-    except OSError as exc:
-        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
-            return False
-        raise
-    return True
+    POSIX-only for now (phase 4b of the Windows port moved the body into
+    ``hostplatform.posix_backend`` for reuse; the Windows counterpart
+    already exists as ``hostplatform.windows_backend.try_acquire_exclusive``,
+    built in an earlier phase, but nothing calls it yet -- ``MutationLock``
+    still only ever hands this function a raw POSIX fd. Wiring the two
+    together is phase 4d, not this one).
+    """
+
+    from .hostplatform import posix_backend
+
+    return posix_backend.try_vault_advisory_lock(root_fd)
 
 
 def _release_vault_advisory_lock(root_fd: int) -> None:
     """Release an advisory lock previously acquired on the vault descriptor."""
 
-    try:
-        fcntl_module = __import__("fcntl")
-        flock = getattr(fcntl_module, "flock")
-        lock_un = int(getattr(fcntl_module, "LOCK_UN"))
-        flock(root_fd, lock_un)
-    except (ImportError, AttributeError, OSError, TypeError, ValueError):
-        # Closing the final open file description also releases flock.  The
-        # explicit unlock is best-effort so release cannot leak descriptors.
-        pass
+    from .hostplatform import posix_backend
+
+    posix_backend.release_vault_advisory_lock(root_fd)
 
 
 def _open_lock_directory_at(parent_fd: int, name: str) -> int:
-    """Open one lock directory relative to its already pinned parent."""
+    """Open one lock directory relative to its already pinned parent.
 
-    flags = (
-        os.O_RDONLY
-        | os.O_DIRECTORY
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    return os.open(name, flags, dir_fd=parent_fd)
+    POSIX-only for now (phase 4c of the Windows port moved these five
+    lock-owner-record functions into ``hostplatform.posix_backend`` for
+    reuse; ``MutationLock``'s body still only ever hands them raw POSIX fds
+    -- Windows wiring is phase 4d).
+    """
+
+    from .hostplatform import posix_backend
+
+    return posix_backend.open_lock_directory_at(parent_fd, name)
 
 
 def _lock_entry_matches(parent_fd: int, name: str, lock_fd: int) -> bool:
     """Return whether ``name`` still denotes the pinned directory."""
 
-    try:
-        entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        pinned = os.fstat(lock_fd)
-    except OSError:
-        return False
-    return (
-        stat.S_ISDIR(entry.st_mode)
-        and entry.st_dev == pinned.st_dev
-        and entry.st_ino == pinned.st_ino
-    )
+    from .hostplatform import posix_backend
+
+    return posix_backend.lock_entry_matches(parent_fd, name, lock_fd)
 
 
 def _read_lock_owner_at(
@@ -1552,94 +1588,35 @@ def _read_lock_owner_at(
 ) -> dict[str, Any] | None:
     """Read a bounded regular owner record through a pinned lock descriptor."""
 
-    try:
-        before = os.stat("owner.json", dir_fd=lock_fd, follow_symlinks=False)
-    except OSError:
+    from .hostplatform import posix_backend
+
+    raw = posix_backend.read_lock_owner_at(lock_fd, limit=limit)
+    if raw is None:
         return None
-    if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
-        return None
-    flags = (
-        os.O_RDONLY
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
     try:
-        descriptor = os.open("owner.json", flags, dir_fd=lock_fd)
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_dev != before.st_dev
-            or opened.st_ino != before.st_ino
-            or opened.st_size > limit
-        ):
-            os.close(descriptor)
-            return None
-        with os.fdopen(descriptor, "rb") as handle:
-            raw = handle.read(limit + 1)
-        if len(raw) > limit:
-            return None
         value = _strict_json_loads(raw.decode("utf-8"))
-        return value if isinstance(value, dict) else None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return None
+    return value if isinstance(value, dict) else None
 
 
 def _write_lock_owner_at(lock_fd: int, value: Mapping[str, Any]) -> None:
     """Atomically install an owner record inside a pinned lock directory."""
 
-    raw = _json_bytes(dict(value))
-    temporary = f".owner.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    descriptor = os.open(temporary, flags, 0o600, dir_fd=lock_fd)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = -1
-            handle.write(raw)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.rename(
-            temporary,
-            "owner.json",
-            src_dir_fd=lock_fd,
-            dst_dir_fd=lock_fd,
-        )
-        os.fsync(lock_fd)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            os.unlink(temporary, dir_fd=lock_fd)
-        except FileNotFoundError:
-            pass
+    from .hostplatform import posix_backend
+
+    posix_backend.write_lock_owner_at(lock_fd, _json_bytes(dict(value)))
 
 
 def _remove_lock_directory_at(parent_fd: int, name: str, lock_fd: int) -> None:
     """Remove only the pinned lock and never a replacement at its public name."""
 
-    if not _lock_entry_matches(parent_fd, name, lock_fd):
-        raise _LockIdentityChanged(f"lock directory identity changed: {name}")
+    from .hostplatform import posix_backend
+
     try:
-        os.unlink("owner.json", dir_fd=lock_fd)
-    except FileNotFoundError:
-        pass
-    try:
-        os.fsync(lock_fd)
-    except OSError:
-        pass
-    if not _lock_entry_matches(parent_fd, name, lock_fd):
-        raise _LockIdentityChanged(f"lock directory identity changed: {name}")
-    os.rmdir(name, dir_fd=parent_fd)
-    try:
-        os.fsync(parent_fd)
-    except OSError:
-        pass
+        posix_backend.remove_lock_directory_at(parent_fd, name, lock_fd)
+    except posix_backend.LockIdentityChanged as exc:
+        raise _LockIdentityChanged(str(exc)) from exc
 
 
 @dataclass
@@ -1663,6 +1640,10 @@ class MutationLock:
         self._parent_fd: int | None = None
         self._lock_fd: int | None = None
         self._advisory_locked = False
+        # COMPATIBLE tier (native Windows) only -- see _acquire_compatible.
+        # Left None on POSIX/STRICT tier for the whole lifetime of the lock.
+        self._win_root_handle: Any = None
+        self._win_lock_dir: Path | None = None
 
     @property
     def owner_path(self) -> Path:
@@ -1671,19 +1652,29 @@ class MutationLock:
     def _owner(self, lock_fd: int) -> dict[str, Any] | None:
         return _read_lock_owner_at(lock_fd)
 
-    def _may_reap(self, now: float, lock_fd: int) -> bool:
-        owner = self._owner(lock_fd)
+    def _may_reap_owner(
+        self,
+        now: float,
+        owner: dict[str, Any] | None,
+        *,
+        fallback_mtime: float | None,
+        process_alive: Any,
+    ) -> bool:
+        """Shared staleness policy behind both tiers' ``_may_reap*``.
+
+        Kept as pure logic over an already-read owner record (plus a
+        fallback mtime for the "owner record missing/unreadable" case) so
+        STRICT and COMPATIBLE never risk drifting on what counts as stale --
+        only how the owner record and mtime are obtained differs per tier.
+        """
+
         if owner is None:
             # A missing or unreadable owner record is ambiguous: the creating
             # process may be paused between mkdir() and its atomic owner write.
             # Only the explicit recovery override may resolve that ambiguity.
-            if not self.force_stale_lock:
+            if not self.force_stale_lock or fallback_mtime is None:
                 return False
-            try:
-                age = now - os.fstat(lock_fd).st_mtime
-            except OSError:
-                return False
-            return age > self.stale_after
+            return now - fallback_mtime > self.stale_after
         started = owner.get("started_epoch")
         pid = owner.get("pid")
         host = owner.get("host")
@@ -1696,8 +1687,301 @@ class MutationLock:
             return True
         if not isinstance(host, str) or host != socket.gethostname():
             return False
-        alive = _process_alive(pid)
+        alive = process_alive(pid)
         return alive is False
+
+    def _may_reap(self, now: float, lock_fd: int) -> bool:
+        owner = self._owner(lock_fd)
+        fallback_mtime: float | None = None
+        if owner is None:
+            try:
+                fallback_mtime = os.fstat(lock_fd).st_mtime
+            except OSError:
+                fallback_mtime = None
+        return self._may_reap_owner(
+            now, owner, fallback_mtime=fallback_mtime, process_alive=_process_alive
+        )
+
+    # --- COMPATIBLE tier (native Windows) -----------------------------------
+    #
+    # No dir_fd confinement is available at all on Windows (os.open cannot
+    # even open a directory there -- see hostplatform.windows_backend's module
+    # docstring), so this whole tier operates by full path instead of a
+    # pinned descriptor chain, narrowing the TOCTOU window rather than
+    # eliminating it -- the same COMPATIBLE-tier tradeoff already made
+    # throughout this file's existing degraded branches (_atomic_vault_write,
+    # _confined_vault_unlink, _path_mode_identity). Process-exclusivity still
+    # needs a real OS primitive with crash-safe auto-release, which plain path
+    # operations cannot provide -- that part uses
+    # hostplatform.windows_backend's CreateFileW + LockFileEx directory
+    # handle, not a marker file/directory alone.
+    #
+    # UNVERIFIED on a real Windows host as of this writing (no Windows CI has
+    # run yet -- see docs/windows-wsl.md and the port plan's phase 8 rollout
+    # rigor). Reachable only behind CODEX_BRAIN_WINDOWS_WRITE=1
+    # (_windows_write_opted_in) -- default behavior on native Windows is
+    # still today's hard refuse until the rollout plan's promotion criteria
+    # are met and that gate is removed.
+
+    def _owner_compatible(self, lock_dir: Path) -> dict[str, Any] | None:
+        owner_path = lock_dir / "owner.json"
+        try:
+            before = owner_path.lstat()
+        except OSError:
+            return None
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 64 * 1024:
+            return None
+        descriptor = -1
+        try:
+            descriptor = os.open(owner_path, read_open_flags())
+            current = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or current.st_size > 64 * 1024
+                or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                return None
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
+                raw = handle.read(64 * 1024 + 1)
+            if len(raw) > 64 * 1024:
+                return None
+            value = _strict_json_loads(raw.decode("utf-8"))
+            return value if isinstance(value, dict) else None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    def _may_reap_compatible(self, now: float, lock_dir: Path) -> bool:
+        owner = self._owner_compatible(lock_dir)
+        fallback_mtime: float | None = None
+        if owner is None:
+            try:
+                fallback_mtime = lock_dir.stat().st_mtime
+            except OSError:
+                fallback_mtime = None
+        from .hostplatform import windows_backend
+
+        return self._may_reap_owner(
+            now,
+            owner,
+            fallback_mtime=fallback_mtime,
+            process_alive=windows_backend.is_process_alive,
+        )
+
+    def _write_owner_compatible(self, lock_dir: Path, value: Mapping[str, Any]) -> None:
+        data = _json_bytes(dict(value))
+        temporary = lock_dir / f".owner.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(temporary, flags, 0o600)
+        except OSError as exc:
+            from .hostplatform import windows_backend
+
+            raise windows_backend.remap_write_error(temporary, exc) from exc
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, lock_dir / "owner.json")
+        except OSError as exc:
+            from .hostplatform import windows_backend
+
+            raise windows_backend.remap_write_error(lock_dir, exc) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _remove_lock_dir_compatible(self, lock_dir: Path, expected: os.stat_result) -> None:
+        """Remove only the pinned lock and never a replacement at its public
+        name -- the path-based analogue of ``_remove_lock_directory_at``."""
+
+        try:
+            (lock_dir / "owner.json").unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            current = lock_dir.lstat()
+        except FileNotFoundError as exc:
+            raise _LockIdentityChanged(f"lock directory identity changed: {lock_dir}") from exc
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (
+            expected.st_dev,
+            expected.st_ino,
+        ):
+            raise _LockIdentityChanged(f"lock directory identity changed: {lock_dir}")
+        lock_dir.rmdir()
+
+    def _close_descriptors_compatible(self) -> None:
+        from .hostplatform import windows_backend
+
+        self._win_lock_dir = None
+        if self._win_root_handle is not None:
+            if self._advisory_locked:
+                try:
+                    windows_backend.release_exclusive(self._win_root_handle)
+                except Exception:
+                    # Best-effort, matching posix_backend.release_vault_advisory_lock:
+                    # closing the handle below also releases the lock, and a
+                    # failed explicit unlock (whatever exception type the
+                    # underlying win32 call raises) must never block cleanup.
+                    pass
+                self._advisory_locked = False
+            windows_backend.close_directory(self._win_root_handle)
+            self._win_root_handle = None
+
+    def _acquire_compatible(self) -> None:
+        from .hostplatform import windows_backend
+
+        deadline = time.monotonic() + max(0.0, self.timeout)
+        meta_dir = self.vault_root / ".vault-meta"
+        lock_dir = meta_dir / "mutation.lock"
+
+        # Identity / alias checks reuse the already-existing path-based
+        # (degraded) functions this file already ships for dry-run and
+        # read-only use on native Windows -- no new identity logic here.
+        if self.expected_vault_identity is not None:
+            identity = _vault_object_identity(self.vault_root)
+            expected_vault = self.expected_vault_identity
+            if (
+                not _valid_existing_vault_identity(expected_vault)
+                or expected_vault["device"] != identity.get("device")
+                or expected_vault["inode"] != identity.get("inode")
+            ):
+                raise TransactionValidationError(
+                    "PLAN_CHANGED", "the selected vault object changed before locking"
+                )
+        _assert_no_portable_vault_root_alias(self.vault_root)
+
+        try:
+            root_handle = windows_backend.open_directory(self.vault_root)
+        except OSError as exc:
+            raise TransactionError("LOCK_FAILED", f"cannot pin vault root: {exc}") from exc
+        self._win_root_handle = root_handle
+
+        try:
+            while True:
+                if windows_backend.try_acquire_exclusive(root_handle):
+                    break
+                if time.monotonic() >= deadline:
+                    raise TransactionConflict(
+                        "LOCK_TIMEOUT", "vault mutation lock is held (owner pid=unknown)"
+                    )
+                time.sleep(self.poll_interval)
+            self._advisory_locked = True
+
+            try:
+                meta_dir.mkdir(mode=0o700, exist_ok=True)
+            except OSError as exc:
+                remapped = windows_backend.remap_write_error(meta_dir, exc)
+                raise TransactionError(
+                    "LOCK_FAILED", f"cannot pin mutation lock parent: {remapped}"
+                ) from remapped
+            self.path = lock_dir
+
+            while True:
+                try:
+                    lock_dir.mkdir(mode=0o700)
+                except FileExistsError:
+                    observed_owner = self._owner_compatible(lock_dir) or {}
+                    if self._may_reap_compatible(time.time(), lock_dir):
+                        try:
+                            pre_rename_stat = lock_dir.lstat()
+                        except OSError:
+                            continue
+                        quarantine = (
+                            meta_dir / f"mutation.lock.reaping-{os.getpid()}-{uuid.uuid4().hex}"
+                        )
+                        try:
+                            os.rename(lock_dir, quarantine)
+                        except OSError:
+                            continue
+                        try:
+                            self._remove_lock_dir_compatible(quarantine, pre_rename_stat)
+                        except (_LockIdentityChanged, OSError):
+                            # Unexpected contents remain confined under a
+                            # unique quarantine name; never traversed
+                            # recursively.
+                            pass
+                        continue
+                    if time.monotonic() >= deadline:
+                        raise TransactionConflict(
+                            "LOCK_TIMEOUT",
+                            "vault mutation lock is held "
+                            f"(owner pid={observed_owner.get('pid', 'unknown')})",
+                        )
+                    time.sleep(self.poll_interval)
+                    continue
+                except OSError as exc:
+                    raise TransactionError(
+                        "LOCK_FAILED",
+                        f"cannot create mutation lock: {windows_backend.remap_write_error(lock_dir, exc)}",
+                    ) from exc
+
+                self._win_lock_dir = lock_dir
+                owner = {
+                    "schema": "codex-brain.mutation-lock.v1",
+                    "pid": os.getpid(),
+                    "token": self.token,
+                    "host": socket.gethostname(),
+                    "started_epoch": time.time(),
+                }
+                try:
+                    self._write_owner_compatible(lock_dir, owner)
+                except Exception:
+                    try:
+                        expected = lock_dir.lstat()
+                        self._remove_lock_dir_compatible(lock_dir, expected)
+                    except OSError:
+                        pass
+                    raise
+                self.acquired = True
+                return
+        except BaseException:
+            if not self.acquired:
+                self._close_descriptors_compatible()
+            raise
+
+    def _release_compatible(self) -> None:
+        lock_dir = self._win_lock_dir
+        try:
+            if lock_dir is None:
+                raise TransactionError(
+                    "LOCK_OWNERSHIP_LOST", "mutation lock descriptors were lost"
+                )
+            owner = self._owner_compatible(lock_dir)
+            if owner is None or not hmac.compare_digest(
+                str(owner.get("token", "")), self.token
+            ):
+                raise TransactionError(
+                    "LOCK_OWNERSHIP_LOST", "mutation lock owner changed before release"
+                )
+            try:
+                expected = lock_dir.lstat()
+            except OSError as exc:
+                raise TransactionError(
+                    "LOCK_RELEASE_FAILED", f"cannot release mutation lock: {exc}"
+                ) from exc
+            try:
+                self._remove_lock_dir_compatible(lock_dir, expected)
+            except _LockIdentityChanged as exc:
+                raise TransactionError(
+                    "LOCK_OWNERSHIP_LOST", "mutation lock path changed before release"
+                ) from exc
+            except OSError as exc:
+                raise TransactionError(
+                    "LOCK_RELEASE_FAILED", f"cannot release mutation lock: {exc}"
+                ) from exc
+        finally:
+            self.acquired = False
+            self._close_descriptors_compatible()
 
     def duplicate_parent_fd(self) -> int:
         """Duplicate the exact held ``.vault-meta`` namespace for a child lock."""
@@ -1742,6 +2026,28 @@ class MutationLock:
     def assert_runtime_namespace_current(self) -> None:
         """Fail if the public metadata entry no longer names the pinned parent."""
 
+        if self._win_root_handle is not None:
+            # COMPATIBLE tier: a point-in-time lstat, not a pinned-descriptor
+            # comparison -- narrower TOCTOU window, same tradeoff as the rest
+            # of this tier (see _acquire_compatible's docstring).
+            if not self.acquired or self._win_lock_dir is None:
+                raise TransactionError(
+                    "RUNTIME_NAMESPACE_CHANGED",
+                    "the vault .vault-meta namespace changed while the mutation lock was held",
+                )
+            try:
+                current = (self.vault_root / ".vault-meta").lstat()
+            except OSError as exc:
+                raise TransactionError(
+                    "RUNTIME_NAMESPACE_CHANGED",
+                    "the vault .vault-meta namespace changed while the mutation lock was held",
+                ) from exc
+            if is_name_surrogate(current) or not stat.S_ISDIR(current.st_mode):
+                raise TransactionError(
+                    "RUNTIME_NAMESPACE_CHANGED",
+                    "the vault .vault-meta namespace changed while the mutation lock was held",
+                )
+            return
         if (
             not self.acquired
             or self._root_fd is None
@@ -1756,6 +2062,34 @@ class MutationLock:
     def assert_vault_root_current(self) -> None:
         """Fail if the public vault entry no longer names the pinned root inode."""
 
+        if self._win_root_handle is not None:
+            if not self.acquired:
+                raise TransactionError(
+                    "VAULT_NAMESPACE_CHANGED",
+                    "the selected vault root changed while the mutation lock was held",
+                )
+            try:
+                current = self.vault_root.lstat()
+            except OSError as exc:
+                raise TransactionError(
+                    "VAULT_NAMESPACE_CHANGED",
+                    "the selected vault root changed while the mutation lock was held",
+                ) from exc
+            if is_name_surrogate(current) or not stat.S_ISDIR(current.st_mode):
+                raise TransactionError(
+                    "VAULT_NAMESPACE_CHANGED",
+                    "the selected vault root changed while the mutation lock was held",
+                )
+            try:
+                _assert_no_portable_vault_leaf_alias_at(
+                    self.vault_root.parent, self.vault_root.name, self_lstat=current
+                )
+            except TransactionValidationError as exc:
+                raise TransactionError(
+                    "VAULT_NAMESPACE_CHANGED",
+                    "the selected vault root gained a portable sibling alias",
+                ) from exc
+            return
         public_matches = False
         if self._root_fd is not None:
             try:
@@ -1794,7 +2128,7 @@ class MutationLock:
                 "the selected vault root gained a portable sibling alias",
             ) from exc
 
-    def _close_descriptors(self) -> None:
+    def _close_descriptors_strict(self) -> None:
         if self._lock_fd is not None:
             os.close(self._lock_fd)
             self._lock_fd = None
@@ -1812,8 +2146,33 @@ class MutationLock:
             self._root_parent_fd = None
 
     def acquire(self) -> None:
+        """Acquire the mutation lock, dispatching to the tier this vault's
+        volume supports -- STRICT (POSIX dir_fd confinement, unchanged) or
+        COMPATIBLE (native Windows, see _acquire_compatible, gated behind
+        CODEX_BRAIN_WINDOWS_WRITE=1 during rollout). Refuses outright on
+        UNSAFE_REFUSED (e.g. FAT/exFAT). Delegates to the module-level
+        ``_require_write_platform`` so this and every top-level entry point
+        (``apply_bundle``, ``cli.py``) resolve the exact same tier for the
+        exact same vault and can never disagree.
+        """
+
         if self.acquired:
             return
+        tier = _require_write_platform(self.vault_root)
+        if tier is GuaranteeTier.COMPATIBLE:
+            self._acquire_compatible()
+            return
+        self._acquire_strict()
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        if self._win_root_handle is not None or self._win_lock_dir is not None:
+            self._release_compatible()
+            return
+        self._release_strict()
+
+    def _acquire_strict(self) -> None:
         deadline = time.monotonic() + max(0.0, self.timeout)
         try:
             root_fd = _open_lock_root_fd(self.vault_root)
@@ -1841,12 +2200,12 @@ class MutationLock:
         try:
             self._root_parent_fd = os.open(self.vault_root.parent, root_parent_flags)
         except OSError as exc:
-            self._close_descriptors()
+            self._close_descriptors_strict()
             raise TransactionError(
                 "LOCK_FAILED", f"cannot pin vault-root parent: {exc}"
             ) from exc
         if not _lock_entry_matches(self._root_parent_fd, self._root_name, root_fd):
-            self._close_descriptors()
+            self._close_descriptors_strict()
             raise TransactionError(
                 "LOCK_FAILED", "vault root changed while its descriptor was acquired"
             )
@@ -1857,7 +2216,7 @@ class MutationLock:
                 self_lstat=os.fstat(root_fd),
             )
         except TransactionValidationError:
-            self._close_descriptors()
+            self._close_descriptors_strict()
             raise
         if self.expected_vault_identity is not None:
             expected_vault = self.expected_vault_identity
@@ -1867,7 +2226,7 @@ class MutationLock:
                 or expected_vault["device"] != pinned_root.st_dev
                 or expected_vault["inode"] != pinned_root.st_ino
             ):
-                self._close_descriptors()
+                self._close_descriptors_strict()
                 raise TransactionValidationError(
                     "PLAN_CHANGED",
                     "the selected vault object changed before locking",
@@ -1880,7 +2239,7 @@ class MutationLock:
                 or expected["parent_device"] != parent.st_dev
                 or expected["parent_inode"] != parent.st_ino
             ):
-                self._close_descriptors()
+                self._close_descriptors_strict()
                 raise TransactionValidationError(
                     "PLAN_CHANGED",
                     "the reviewed vault parent/leaf slot changed before locking",
@@ -2019,10 +2378,10 @@ class MutationLock:
                 return
         except BaseException:
             if not self.acquired:
-                self._close_descriptors()
+                self._close_descriptors_strict()
             raise
 
-    def release(self) -> None:
+    def _release_strict(self) -> None:
         if not self.acquired:
             return
         parent_fd, lock_fd = self._parent_fd, self._lock_fd
@@ -2050,7 +2409,7 @@ class MutationLock:
                 ) from exc
         finally:
             self.acquired = False
-            self._close_descriptors()
+            self._close_descriptors_strict()
 
     def __enter__(self) -> "MutationLock":
         self.acquire()
@@ -2076,20 +2435,45 @@ def _runtime_component(value: str) -> str:
 
 
 def _open_runtime_directory_at(
-    parent_fd: int,
+    parent: int | Path,
     name: str,
     *,
     create: bool,
     mode: int = 0o700,
-) -> int:
-    """Open one runtime directory relative to a pinned parent, never following aliases."""
+) -> int | Path:
+    """Open one runtime directory relative to a pinned parent, never following aliases.
+
+    ``parent`` is a POSIX dir_fd (STRICT tier, kernel-pinned) or a ``Path``
+    (COMPATIBLE tier / native Windows -- see MutationLock's
+    ``_acquire_compatible``, which never sets a fd for callers to use here).
+    The ``Path`` branch narrows the TOCTOU window instead of eliminating it,
+    the same tradeoff already made throughout this file's other degraded
+    branches (``_atomic_vault_write``, ``_path_mode_identity``, etc.).
+    """
 
     component = _runtime_component(name)
+    if isinstance(parent, Path):
+        child = parent / component
+        if create:
+            try:
+                child.mkdir(mode=mode)
+            except FileExistsError:
+                pass
+        metadata = child.lstat()  # raises FileNotFoundError when create=False and absent
+        if is_name_surrogate(metadata):
+            raise OSError(
+                errno.ELOOP, f"runtime entry is a symlink or junction: {component}"
+            )
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise TransactionRecoveryError(
+                "CORRUPT_RUNTIME_STATE", f"runtime entry is not a directory: {component}"
+            )
+        return child
     if create:
         try:
-            os.mkdir(component, mode=mode, dir_fd=parent_fd)
+            os.mkdir(component, mode=mode, dir_fd=parent)
             try:
-                os.fsync(parent_fd)
+                os.fsync(parent)
             except OSError:
                 pass
         except FileExistsError:
@@ -2101,7 +2485,7 @@ def _open_runtime_directory_at(
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NONBLOCK", 0)
     )
-    descriptor = os.open(component, flags, dir_fd=parent_fd)
+    descriptor = os.open(component, flags, dir_fd=parent)
     metadata = os.fstat(descriptor)
     if not stat.S_ISDIR(metadata.st_mode):
         os.close(descriptor)
@@ -2111,20 +2495,26 @@ def _open_runtime_directory_at(
     return descriptor
 
 
-def _runtime_entry_metadata(directory_fd: int, name: str) -> os.stat_result | None:
+def _runtime_entry_metadata(directory: int | Path, name: str) -> os.stat_result | None:
     component = _runtime_component(name)
     try:
-        return os.stat(component, dir_fd=directory_fd, follow_symlinks=False)
+        if isinstance(directory, Path):
+            return (directory / component).lstat()
+        return os.stat(component, dir_fd=directory, follow_symlinks=False)
     except FileNotFoundError:
         return None
 
 
-def _bounded_runtime_names(directory_fd: int, *, limit: int, label: str) -> list[str]:
-    """Enumerate a runtime directory without materializing unbounded attacker state."""
+def _bounded_runtime_names(directory: int | Path, *, limit: int, label: str) -> list[str]:
+    """Enumerate a runtime directory without materializing unbounded attacker state.
+
+    ``os.scandir`` already accepts either a dir_fd or a path-like directly,
+    so this needs no tier branch of its own.
+    """
 
     names: list[str] = []
     try:
-        with os.scandir(directory_fd) as entries:
+        with os.scandir(directory) as entries:
             for entry in entries:
                 names.append(_runtime_component(entry.name))
                 if len(names) > limit:
@@ -2142,7 +2532,7 @@ def _bounded_runtime_names(directory_fd: int, *, limit: int, label: str) -> list
 
 
 def _read_runtime_bytes_at(
-    directory_fd: int,
+    directory: int | Path,
     name: str,
     *,
     label: str,
@@ -2152,9 +2542,57 @@ def _read_runtime_bytes_at(
     """Read a stable bounded regular runtime file from a pinned directory."""
 
     component = _runtime_component(name)
+    if isinstance(directory, Path):
+        target = directory / component
+        descriptor = -1
+        try:
+            before = target.lstat()
+            if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+                raise error_type(
+                    "CORRUPT_RUNTIME_STATE", f"{label} is not a bounded regular file"
+                )
+            descriptor = os.open(target, read_open_flags())
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
+                or opened.st_size > limit
+            ):
+                raise error_type(
+                    "CORRUPT_RUNTIME_STATE", f"{label} changed before it was read"
+                )
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                block = os.read(descriptor, min(1024 * 1024, limit + 1 - total))
+                if not block:
+                    break
+                chunks.append(block)
+                total += len(block)
+                if total > limit:
+                    raise error_type(
+                        "CORRUPT_RUNTIME_STATE", f"{label} exceeds its size limit"
+                    )
+            after = os.fstat(descriptor)
+            stable = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode")
+            if any(getattr(opened, field) != getattr(after, field) for field in stable):
+                raise error_type(
+                    "CORRUPT_RUNTIME_STATE", f"{label} changed while it was read"
+                )
+            return b"".join(chunks)
+        except TransactionError:
+            raise
+        except OSError as exc:
+            raise error_type(
+                "CORRUPT_RUNTIME_STATE", f"cannot read {label}: {exc}"
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
     descriptor = -1
     try:
-        before = os.stat(component, dir_fd=directory_fd, follow_symlinks=False)
+        before = os.stat(component, dir_fd=directory, follow_symlinks=False)
         if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
             raise error_type(
                 "CORRUPT_RUNTIME_STATE", f"{label} is not a bounded regular file"
@@ -2165,7 +2603,7 @@ def _read_runtime_bytes_at(
             | os.O_NOFOLLOW
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NONBLOCK", 0),
-            dir_fd=directory_fd,
+            dir_fd=directory,
         )
         opened = os.fstat(descriptor)
         if (
@@ -2229,7 +2667,7 @@ def _read_runtime_json_at(
 
 
 def _atomic_runtime_write_at(
-    directory_fd: int,
+    directory: int | Path,
     name: str,
     data: bytes,
     *,
@@ -2238,6 +2676,39 @@ def _atomic_runtime_write_at(
     """Atomically replace one runtime file inside a pinned directory."""
 
     component = _runtime_component(name)
+    if isinstance(directory, Path):
+        target = directory / component
+        temporary = directory / f".{component}.txn-{os.getpid()}-{uuid.uuid4().hex}"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                mode,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+                # Windows CRT synthesizes permission bits regardless of the
+                # open() mode= argument (mode_verified=False for this tier,
+                # per platform.capability) -- no fchmod call, matching how
+                # _portable_file_mode already treats Windows modes elsewhere.
+            os.replace(temporary, target)
+            _fsync_directory(directory)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return
     temporary = f".{component}.txn-{os.getpid()}-{uuid.uuid4().hex}"
     descriptor = -1
     try:
@@ -2249,7 +2720,7 @@ def _atomic_runtime_write_at(
             | os.O_NOFOLLOW
             | getattr(os, "O_CLOEXEC", 0),
             mode,
-            dir_fd=directory_fd,
+            dir_fd=directory,
         )
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = -1
@@ -2260,21 +2731,21 @@ def _atomic_runtime_write_at(
         os.rename(
             temporary,
             component,
-            src_dir_fd=directory_fd,
-            dst_dir_fd=directory_fd,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
         )
-        os.fsync(directory_fd)
+        os.fsync(directory)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
         try:
-            os.unlink(temporary, dir_fd=directory_fd)
+            os.unlink(temporary, dir_fd=directory)
         except FileNotFoundError:
             pass
 
 
 def _atomic_runtime_json_at(
-    directory_fd: int,
+    directory: int | Path,
     name: str,
     value: Any,
     *,
@@ -2287,7 +2758,7 @@ def _atomic_runtime_json_at(
             f"runtime JSON exceeds the {MAX_TRANSACTION_RUNTIME_JSON_BYTES}-byte recovery limit",
         )
     try:
-        _atomic_runtime_write_at(directory_fd, name, data)
+        _atomic_runtime_write_at(directory, name, data)
     except OSError as exc:
         raise error_type(
             "CORRUPT_RUNTIME_STATE", f"cannot write confined runtime file {name}: {exc}"
@@ -2295,14 +2766,22 @@ def _atomic_runtime_json_at(
 
 
 def _remove_pinned_runtime_tree_at(
-    parent_fd: int,
+    parent: int | Path,
     name: str,
-    directory_fd: int,
+    directory: int | Path,
     *,
     remaining: list[int] | None = None,
     depth: int = 0,
 ) -> None:
-    """Recursively remove only a pinned runtime tree, never a replacement alias."""
+    """Recursively remove only a pinned runtime tree, never a replacement alias.
+
+    COMPATIBLE tier (``directory`` is a ``Path``): the entry identity used
+    for the pre-rmdir re-check is captured by ``lstat`` at the top of this
+    call (i.e. immediately after the parent's scan produced this entry),
+    narrowing the TOCTOU window rather than eliminating it -- there is no
+    kernel-pinned handle to compare against the way STRICT tier's
+    ``directory_fd`` provides.
+    """
 
     component = _runtime_component(name)
     if depth > MAX_TRANSACTION_RUNTIME_TREE_DEPTH:
@@ -2311,46 +2790,76 @@ def _remove_pinned_runtime_tree_at(
         )
     if remaining is None:
         remaining = [MAX_TRANSACTION_RUNTIME_TREE_ENTRIES]
+    is_path_mode = isinstance(directory, Path)
+    if is_path_mode:
+        try:
+            entry_identity = directory.lstat()
+        except FileNotFoundError as exc:
+            raise _LockIdentityChanged(
+                f"runtime directory changed before removal: {component}"
+            ) from exc
     child_names = _bounded_runtime_names(
-        directory_fd,
+        directory,
         limit=remaining[0],
         label=f"transaction runtime {component}",
     )
     remaining[0] -= len(child_names)
     for child_name in child_names:
-        metadata = os.stat(child_name, dir_fd=directory_fd, follow_symlinks=False)
+        if is_path_mode:
+            metadata = (directory / child_name).lstat()
+        else:
+            metadata = os.stat(child_name, dir_fd=directory, follow_symlinks=False)
         if stat.S_ISDIR(metadata.st_mode):
             if depth >= MAX_TRANSACTION_RUNTIME_TREE_DEPTH:
                 raise TransactionRecoveryError(
                     "CORRUPT_RUNTIME_STATE",
                     "transaction runtime contains an unsupported nested directory",
                 )
-            child_fd = _open_runtime_directory_at(
-                directory_fd, child_name, create=False
+            child_ref = _open_runtime_directory_at(
+                directory, child_name, create=False
             )
             try:
-                if not _lock_entry_matches(directory_fd, child_name, child_fd):
+                if not is_path_mode and not _lock_entry_matches(
+                    directory, child_name, child_ref
+                ):
                     raise _LockIdentityChanged(
                         f"runtime directory changed before removal: {child_name}"
                     )
                 _remove_pinned_runtime_tree_at(
-                    directory_fd,
+                    directory,
                     child_name,
-                    child_fd,
+                    child_ref,
                     remaining=remaining,
                     depth=depth + 1,
                 )
             finally:
-                os.close(child_fd)
+                if not is_path_mode:
+                    os.close(child_ref)
         else:
-            os.unlink(child_name, dir_fd=directory_fd)
-    if not _lock_entry_matches(parent_fd, component, directory_fd):
+            if is_path_mode:
+                (directory / child_name).unlink()
+            else:
+                os.unlink(child_name, dir_fd=directory)
+    if is_path_mode:
+        try:
+            current = directory.lstat()
+        except FileNotFoundError as exc:
+            raise _LockIdentityChanged(
+                f"runtime directory changed before removal: {component}"
+            ) from exc
+        if not is_same_object(current, entry_identity):
+            raise _LockIdentityChanged(
+                f"runtime directory changed before removal: {component}"
+            )
+        directory.rmdir()
+        return
+    if not _lock_entry_matches(parent, component, directory):
         raise _LockIdentityChanged(
             f"runtime directory changed before removal: {component}"
         )
-    os.rmdir(component, dir_fd=parent_fd)
+    os.rmdir(component, dir_fd=parent)
     try:
-        os.fsync(parent_fd)
+        os.fsync(parent)
     except OSError:
         pass
 
@@ -2358,11 +2867,11 @@ def _remove_pinned_runtime_tree_at(
 @dataclass
 class _OperationStore:
     name: str
-    parent_fd: int
-    fd: int
-    backups_fd: int | None = None
+    parent_fd: int | Path
+    fd: int | Path
+    backups_fd: int | Path | None = None
 
-    def open_backups(self, *, create: bool) -> int | None:
+    def open_backups(self, *, create: bool) -> int | Path | None:
         if self.backups_fd is not None:
             return self.backups_fd
         try:
@@ -2407,6 +2916,39 @@ class _OperationStore:
             ) from exc
 
     def assert_current(self) -> None:
+        if isinstance(self.fd, Path):
+            # COMPATIBLE tier: point-in-time lstat, not pinned-descriptor
+            # identity -- same narrowed-TOCTOU tradeoff as the rest of this
+            # tier (see _remove_pinned_runtime_tree_at's docstring).
+            try:
+                current = self.fd.lstat()
+            except OSError as exc:
+                raise TransactionError(
+                    "RUNTIME_NAMESPACE_CHANGED",
+                    f"transaction runtime changed while held: {self.name}",
+                ) from exc
+            if is_name_surrogate(current) or not stat.S_ISDIR(current.st_mode):
+                raise TransactionError(
+                    "RUNTIME_NAMESPACE_CHANGED",
+                    f"transaction runtime changed while held: {self.name}",
+                )
+            if self.backups_fd is not None:
+                assert isinstance(self.backups_fd, Path)
+                try:
+                    backups_current = self.backups_fd.lstat()
+                except OSError as exc:
+                    raise TransactionError(
+                        "RUNTIME_NAMESPACE_CHANGED",
+                        f"transaction backups changed while held: {self.name}",
+                    ) from exc
+                if is_name_surrogate(backups_current) or not stat.S_ISDIR(
+                    backups_current.st_mode
+                ):
+                    raise TransactionError(
+                        "RUNTIME_NAMESPACE_CHANGED",
+                        f"transaction backups changed while held: {self.name}",
+                    )
+            return
         if not _lock_entry_matches(self.parent_fd, self.name, self.fd):
             raise TransactionError(
                 "RUNTIME_NAMESPACE_CHANGED",
@@ -2421,6 +2963,9 @@ class _OperationStore:
             )
 
     def close(self) -> None:
+        if isinstance(self.fd, Path):
+            self.backups_fd = None
+            return
         if self.backups_fd is not None:
             os.close(self.backups_fd)
             self.backups_fd = None
@@ -2437,12 +2982,14 @@ class _OperationStore:
 
 @dataclass
 class _RuntimeStore:
-    root_fd: int
-    meta_fd: int
-    transactions_fd: int | None
+    root_fd: int | Path
+    meta_fd: int | Path
+    transactions_fd: int | Path | None
 
     @classmethod
     def from_lock(cls, lock: MutationLock, *, create: bool) -> "_RuntimeStore":
+        if lock._win_root_handle is not None:
+            return cls._from_lock_compatible(lock, create=create)
         root_fd = lock.duplicate_root_fd()
         meta_fd = lock.duplicate_parent_fd()
         transactions_fd: int | None = None
@@ -2466,6 +3013,31 @@ class _RuntimeStore:
             os.close(root_fd)
             raise
 
+    @classmethod
+    def _from_lock_compatible(cls, lock: MutationLock, *, create: bool) -> "_RuntimeStore":
+        """COMPATIBLE tier (native Windows): MutationLock never sets a
+        POSIX fd there (see ``_acquire_compatible``), so this builds the
+        store from plain paths instead of ``duplicate_root_fd``/
+        ``duplicate_parent_fd``, which only work in STRICT tier."""
+
+        if not lock.acquired:
+            raise TransactionError(
+                "LOCK_NOT_HELD", "vault root is unavailable outside a held mutation lock"
+            )
+        root = lock.vault_root
+        meta = root / ".vault-meta"
+        transactions: Path | None = None
+        try:
+            transactions = _open_runtime_directory_at(meta, "transactions", create=create)
+        except FileNotFoundError:
+            if create:
+                raise
+        except OSError as exc:
+            raise TransactionRecoveryError(
+                "CORRUPT_RUNTIME_STATE", f"cannot open transactions runtime: {exc}"
+            ) from exc
+        return cls(root, meta, transactions)
+
     def operation_names(self) -> list[str]:
         if self.transactions_fd is None:
             return []
@@ -2476,6 +3048,22 @@ class _RuntimeStore:
         )
 
     def assert_current(self) -> None:
+        if isinstance(self.meta_fd, Path):
+            if self.transactions_fd is not None:
+                assert isinstance(self.transactions_fd, Path)
+                try:
+                    current = self.transactions_fd.lstat()
+                except OSError as exc:
+                    raise TransactionError(
+                        "RUNTIME_NAMESPACE_CHANGED",
+                        "transactions runtime changed while the mutation lock was held",
+                    ) from exc
+                if is_name_surrogate(current) or not stat.S_ISDIR(current.st_mode):
+                    raise TransactionError(
+                        "RUNTIME_NAMESPACE_CHANGED",
+                        "transactions runtime changed while the mutation lock was held",
+                    )
+            return
         if self.transactions_fd is not None and not _lock_entry_matches(
             self.meta_fd, "transactions", self.transactions_fd
         ):
@@ -2521,6 +3109,9 @@ class _RuntimeStore:
             ) from exc
 
     def close(self) -> None:
+        if isinstance(self.meta_fd, Path):
+            self.transactions_fd = None
+            return
         if self.transactions_fd is not None:
             os.close(self.transactions_fd)
             self.transactions_fd = None
@@ -2835,8 +3426,8 @@ def _expand_managed_metadata(
     bundle: dict[str, Any],
     bundle_dir: Path,
     *,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> dict[str, Any]:
     """Expand address/source requests into ordinary transaction writes.
 
@@ -3261,9 +3852,9 @@ def _prepare_writes(
     bundle_dir: Path,
     transaction_dir: Path | None,
     *,
-    backups_fd: int | None = None,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    backups_fd: int | Path | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> list[PreparedWrite]:
     raw_writes = bundle.get("writes")
     if not isinstance(raw_writes, list) or not raw_writes:
@@ -3299,7 +3890,7 @@ def _prepare_writes(
     for raw_path, digest in expected.items():
         normalized_path = (
             _normalize_vault_path(raw_path)
-            if root_fd is not None
+            if isinstance(root_fd, int)
             else _safe_vault_path(vault_root, raw_path)[0]
         )
         _assert_no_existing_portable_alias(
@@ -3351,7 +3942,7 @@ def _prepare_writes(
                 "INVALID_WRITE", f"write {index} must be an object"
             )
         relative = raw.get("path")
-        if root_fd is None:
+        if not isinstance(root_fd, int):
             normalized, target = _safe_vault_path(vault_root, relative)
         else:
             normalized = _normalize_vault_path(relative)
@@ -3507,8 +4098,8 @@ def _validate_provenance_writes(
     vault_root: Path,
     prepared: Iterable[PreparedWrite],
     *,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> None:
     """Validate the complete prospective source/claim ledger pair."""
 
@@ -3719,7 +4310,7 @@ def _valid_journal_sha256(value: Any, *, nullable: bool = False) -> bool:
     )
 
 
-def _read_recovery_backup_at(directory_fd: int, name: str, *, label: str) -> bytes:
+def _read_recovery_backup_at(directory_fd: int | Path, name: str, *, label: str) -> bytes:
     try:
         return _read_runtime_bytes_at(
             directory_fd,
@@ -3736,8 +4327,8 @@ def _validated_recovery_writes(
     transaction: _OperationStore,
     journal: Mapping[str, Any],
     *,
-    root_fd: int,
-    meta_fd: int,
+    root_fd: int | Path,
+    meta_fd: int | Path,
 ) -> list[RecoveryWrite]:
     """Preflight the complete journal and all backups before rollback mutates."""
 
@@ -3939,8 +4530,8 @@ def _restore_journal(
     transaction: _OperationStore,
     journal: dict[str, Any],
     *,
-    root_fd: int,
-    meta_fd: int,
+    root_fd: int | Path,
+    meta_fd: int | Path,
 ) -> None:
     writes = _validated_recovery_writes(
         vault_root,
@@ -4006,8 +4597,8 @@ def _validate_completed_result(
     *,
     error_type: type[TransactionError],
     code: str,
-    root_fd: int | None = None,
-    meta_fd: int | None = None,
+    root_fd: int | Path | None = None,
+    meta_fd: int | Path | None = None,
 ) -> None:
     paths = result.get("changed_paths")
     hashes = result.get("hashes")
@@ -4357,7 +4948,7 @@ def apply_bundle(
     reviewed_vault_identity: Mapping[str, Any] | None = None,
     expected_current_vault_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    _require_write_platform()
+    _require_write_platform(vault_root)
     vault = canonical(vault_root)
     if not vault.is_dir():
         raise TransactionValidationError(
@@ -4434,11 +5025,28 @@ def apply_bundle(
                     "the current vault directory object differs from the apply transition",
                 )
             if reviewed_vault_identity is not None:
-                assert mutation_lock._root_parent_fd is not None
-                parent_identity = os.fstat(mutation_lock._root_parent_fd)
+                if mutation_lock._root_parent_fd is not None:
+                    parent_identity = os.fstat(mutation_lock._root_parent_fd)
+                    parent_device = parent_identity.st_dev
+                    parent_inode = parent_identity.st_ino
+                else:
+                    # COMPATIBLE tier: no pinned parent fd -- the accepted
+                    # narrower point-in-time lstat, same tradeoff as every
+                    # other degraded-mode identity check in this file.
+                    try:
+                        parent_identity = assert_unaliased_directory(
+                            mutation_lock.vault_root.parent
+                        )
+                    except OSError as exc:
+                        raise TransactionValidationError(
+                            "PLAN_CHANGED",
+                            f"cannot verify the reviewed absent vault slot: {exc}",
+                        ) from exc
+                    parent_device = parent_identity.st_dev
+                    parent_inode = parent_identity.st_ino
                 if (
-                    reviewed_vault_identity["parent_device"] != parent_identity.st_dev
-                    or reviewed_vault_identity["parent_inode"] != parent_identity.st_ino
+                    reviewed_vault_identity["parent_device"] != parent_device
+                    or reviewed_vault_identity["parent_inode"] != parent_inode
                     or reviewed_vault_identity["leaf"] != mutation_lock._root_name
                 ):
                     raise TransactionValidationError(

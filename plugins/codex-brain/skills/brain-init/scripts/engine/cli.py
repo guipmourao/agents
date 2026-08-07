@@ -815,7 +815,7 @@ def command_init(args: argparse.Namespace) -> int:
     # Refuse unsupported write platforms before creating the destination
     # directory: a failed Init root is never path-deleted (see below), so the
     # check must precede the mkdir rather than surface later in apply_bundle.
-    _require_write_platform()
+    _require_write_platform(destination)
     reviewed_plan = _require_approved_plan(args, destination, operation)
     approval = str(reviewed_plan["approval_sha256"])
     created = False

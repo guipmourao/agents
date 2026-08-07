@@ -9,7 +9,6 @@ descriptors, so a vault-controlled symlink swap cannot redirect an operation.
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import os
 import re
@@ -17,13 +16,13 @@ import stat
 import sys
 import time
 import unicodedata
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterator, Sequence
 
-from .paths import VaultSelectionError, assert_not_plugin_tree, canonical
+from .paths import VaultSelectionError, assert_not_plugin_tree, canonical, is_name_surrogate
+from .hostplatform import dirops
 from .transaction import (
     MutationLock,
     TransactionConflict,
@@ -188,131 +187,85 @@ def _parse_arguments(argv: Sequence[str]) -> ParsedArguments:
     return ParsedArguments(command, tuple(operands), stale_after, max_age)
 
 
-def _supports_confined_runtime() -> bool:
-    required_dir_fd = (os.open, os.mkdir, os.stat, os.unlink, os.link)
-    return (
-        os.name != "nt"
-        and hasattr(os, "O_DIRECTORY")
-        and hasattr(os, "O_NOFOLLOW")
-        and os.listdir in os.supports_fd
-        and all(function in os.supports_dir_fd for function in required_dir_fd)
-        and os.stat in os.supports_follow_symlinks
-        and os.link in os.supports_follow_symlinks
-    )
+def _open_root(vault_root: Path) -> dirops.PinnedDirectory:
+    """Open the vault root as a pinned directory, POSIX or Windows.
 
+    On POSIX this still requires dir_fd confinement (STRICT tier), same as
+    before; on Windows this now succeeds via ``hostplatform.windows_backend``
+    (COMPATIBLE tier) instead of refusing outright. Callers of this function
+    are all read-only (``list``/``peek``/path validation) -- the write path
+    (``acquire``/``release``/``clear-stale``) goes through
+    ``_serialized_lock_directory``/``MutationLock`` instead, which stays
+    POSIX-only until that lock itself is ported.
+    """
 
-def _directory_flags() -> int:
-    return os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
-
-
-def _fsync_directory(descriptor: int) -> None:
     try:
-        os.fsync(descriptor)
-    except OSError as exc:
-        if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EROFS}:
-            raise _runtime_error(f"cannot flush legacy lock directory: {exc}") from exc
-
-
-def _open_root(vault_root: Path) -> int:
-    if not _supports_confined_runtime():
-        raise _runtime_error("this platform lacks no-follow directory-FD operations")
-    try:
-        descriptor = os.open(vault_root, _directory_flags())
-        metadata = os.fstat(descriptor)
+        return dirops.open_root(vault_root)
     except OSError as exc:
         raise _runtime_error(f"cannot open selected vault safely: {exc}") from exc
-    if not stat.S_ISDIR(metadata.st_mode):
-        os.close(descriptor)
-        raise _runtime_error("selected vault is not a directory")
-    return descriptor
 
 
 def _open_child_directory(
-    parent_descriptor: int,
+    parent: dirops.PinnedDirectory,
     name: str,
     *,
     create: bool,
-) -> int | None:
+) -> dirops.PinnedDirectory | None:
     try:
-        descriptor = os.open(name, _directory_flags(), dir_fd=parent_descriptor)
-    except FileNotFoundError:
-        if not create:
-            return None
-        try:
-            os.mkdir(name, 0o700, dir_fd=parent_descriptor)
-            _fsync_directory(parent_descriptor)
-            descriptor = os.open(name, _directory_flags(), dir_fd=parent_descriptor)
-        except FileExistsError:
-            try:
-                descriptor = os.open(name, _directory_flags(), dir_fd=parent_descriptor)
-            except OSError as exc:
-                raise _runtime_error(
-                    f"legacy runtime component is not a safe directory: {name}: {exc}"
-                ) from exc
-        except OSError as exc:
-            raise _runtime_error(
-                f"cannot create legacy runtime directory {name}: {exc}"
-            ) from exc
+        return dirops.open_child(parent, name, create=create)
     except OSError as exc:
         raise _runtime_error(
             f"legacy runtime component is not a safe directory: {name}: {exc}"
         ) from exc
 
-    metadata = os.fstat(descriptor)
-    if not stat.S_ISDIR(metadata.st_mode):
-        os.close(descriptor)
-        raise _runtime_error(f"legacy runtime component is not a directory: {name}")
-    return descriptor
-
 
 @contextmanager
-def _lock_directory(vault_root: Path, *, create: bool) -> Iterator[int | None]:
-    root_descriptor = _open_root(vault_root)
-    meta_descriptor: int | None = None
-    locks_descriptor: int | None = None
+def _lock_directory(
+    vault_root: Path, *, create: bool
+) -> Iterator[dirops.PinnedDirectory | None]:
+    root = _open_root(vault_root)
+    meta: dirops.PinnedDirectory | None = None
+    locks: dirops.PinnedDirectory | None = None
     try:
-        meta_descriptor = _open_child_directory(
-            root_descriptor, ".vault-meta", create=create
-        )
-        if meta_descriptor is None:
+        meta = _open_child_directory(root, ".vault-meta", create=create)
+        if meta is None:
             yield None
             return
-        locks_descriptor = _open_child_directory(
-            meta_descriptor, "locks", create=create
-        )
-        yield locks_descriptor
+        locks = _open_child_directory(meta, "locks", create=create)
+        yield locks
     finally:
-        if locks_descriptor is not None:
-            os.close(locks_descriptor)
-        if meta_descriptor is not None:
-            os.close(meta_descriptor)
-        os.close(root_descriptor)
+        if locks is not None:
+            dirops.close(locks)
+        if meta is not None:
+            dirops.close(meta)
+        dirops.close(root)
 
 
 @contextmanager
-def _serialized_lock_directory(vault_root: Path) -> Iterator[int]:
+def _serialized_lock_directory(vault_root: Path) -> Iterator[dirops.PinnedDirectory]:
     try:
         with MutationLock(vault_root, timeout=LOCK_TIMEOUT_SECONDS) as mutation_lock:
             # Use the exact `.vault-meta` directory pinned by MutationLock.
             # Re-resolving it by pathname here would create a split-lock race
             # if that public entry were renamed and replaced between the two
-            # opens. The canonical API returns a duplicate that this adapter
-            # owns and closes independently.
-            pinned_meta = mutation_lock.duplicate_parent_fd()
-            locks_descriptor: int | None = None
+            # opens. MutationLock is POSIX-only today, so `pinned_meta_fd` is
+            # always a real dir_fd here -- wrapping it in PinnedDirectory(fd=)
+            # keeps this adapter on the same dirops primitives as the
+            # read-only paths above without changing behavior on POSIX.
+            pinned_meta_fd = mutation_lock.duplicate_parent_fd()
+            meta = dirops.PinnedDirectory(
+                path=canonical(vault_root) / ".vault-meta", fd=pinned_meta_fd
+            )
+            locks: dirops.PinnedDirectory | None = None
             try:
-                locks_descriptor = _open_child_directory(
-                    pinned_meta, "locks", create=True
-                )
-                if (
-                    locks_descriptor is None
-                ):  # pragma: no cover - create=True is exhaustive
+                locks = _open_child_directory(meta, "locks", create=True)
+                if locks is None:  # pragma: no cover - create=True is exhaustive
                     raise _runtime_error("cannot create legacy lock directory")
-                yield locks_descriptor
+                yield locks
             finally:
-                if locks_descriptor is not None:
-                    os.close(locks_descriptor)
-                os.close(pinned_meta)
+                if locks is not None:
+                    dirops.close(locks)
+                dirops.close(meta)
     except TransactionConflict as exc:
         raise LegacyLockError(exc.code, str(exc), 75) from exc
     except TransactionValidationError as exc:
@@ -354,33 +307,34 @@ def _normalized_relative_path(value: str) -> tuple[str, ...]:
 
 def _validate_target_path(vault_root: Path, value: str) -> None:
     parts = _normalized_relative_path(value)
-    descriptor = _open_root(vault_root)
+    directory = _open_root(vault_root)
     try:
         for index, part in enumerate(parts):
             try:
-                metadata = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+                metadata = dirops.stat_component(directory, part)
             except FileNotFoundError:
                 return
             except OSError as exc:
                 raise _path_error(
                     f"cannot inspect vault-relative path {value}: {exc}"
                 ) from exc
-            if stat.S_ISLNK(metadata.st_mode):
+            # is_name_surrogate (not a bare S_ISLNK check) so a Windows
+            # junction/mount point is rejected exactly like a POSIX symlink
+            # -- on Windows, junctions lstat as ordinary directories
+            # (S_ISLNK is False) but still redirect name lookups.
+            if is_name_surrogate(metadata):
                 raise _path_error(f"path may not traverse a symlink: {value}")
             if index == len(parts) - 1:
                 return
             if not stat.S_ISDIR(metadata.st_mode):
                 raise _path_error(f"path parent is not a directory: {value}")
-            try:
-                child = os.open(part, _directory_flags(), dir_fd=descriptor)
-            except OSError as exc:
-                raise _path_error(
-                    f"cannot inspect vault-relative path {value}: {exc}"
-                ) from exc
-            os.close(descriptor)
-            descriptor = child
+            child = _open_child_directory(directory, part, create=False)
+            if child is None:
+                raise _path_error(f"cannot inspect vault-relative path {value}: missing")
+            dirops.close(directory)
+            directory = child
     finally:
-        os.close(descriptor)
+        dirops.close(directory)
 
 
 def _lock_name(path: str) -> str:
@@ -393,49 +347,6 @@ def _portable_lock_key(path: str) -> str:
     """Collapse aliases that can name one file on supported vault volumes."""
 
     return unicodedata.normalize("NFC", path.casefold())
-
-
-def _read_bounded_regular(descriptor: int, name: str) -> bytes | None:
-    try:
-        before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return b""
-    if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_RECORD_BYTES:
-        return b""
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
-    opened = -1
-    try:
-        opened = os.open(name, flags, dir_fd=descriptor)
-        current = os.fstat(opened)
-        if (
-            not stat.S_ISREG(current.st_mode)
-            or current.st_size > MAX_RECORD_BYTES
-            or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
-        ):
-            return b""
-        chunks: list[bytes] = []
-        remaining = MAX_RECORD_BYTES + 1
-        while remaining > 0:
-            chunk = os.read(opened, min(remaining, 8192))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-        after = os.fstat(opened)
-        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode")
-        if len(raw) > MAX_RECORD_BYTES or any(
-            getattr(current, field) != getattr(after, field) for field in stable_fields
-        ):
-            return b""
-        return raw
-    except OSError:
-        return b""
-    finally:
-        if opened >= 0:
-            os.close(opened)
 
 
 def _parse_record(raw: bytes, *, expected_name: str) -> LockRecord | None:
@@ -459,77 +370,25 @@ def _parse_record(raw: bytes, *, expected_name: str) -> LockRecord | None:
     return LockRecord(pid=pid, epoch=epoch, path=path)
 
 
-def _read_record(descriptor: int, name: str) -> RecordRead:
-    raw = _read_bounded_regular(descriptor, name)
+def _read_record(directory: dirops.PinnedDirectory, name: str) -> RecordRead:
+    raw = dirops.read_bounded_regular(directory, name, max_bytes=MAX_RECORD_BYTES)
     if raw is None:
         return RecordRead(exists=False, record=None)
     return RecordRead(exists=True, record=_parse_record(raw, expected_name=name))
 
 
-def _unlink(descriptor: int, name: str) -> bool:
+def _unlink(directory: dirops.PinnedDirectory, name: str) -> bool:
     try:
-        os.unlink(name, dir_fd=descriptor)
-    except FileNotFoundError:
-        return False
+        return dirops.unlink(directory, name)
     except OSError as exc:
         raise _runtime_error(f"cannot remove legacy lock record safely: {exc}") from exc
-    _fsync_directory(descriptor)
-    return True
 
 
-def _write_all(descriptor: int, data: bytes) -> None:
-    offset = 0
-    while offset < len(data):
-        written = os.write(descriptor, data[offset:])
-        if written <= 0:
-            raise OSError("short write while creating legacy lock record")
-        offset += written
-
-
-def _atomic_create(descriptor: int, name: str, data: bytes) -> bool:
-    temporary = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | os.O_NOFOLLOW
-    )
-    file_descriptor = -1
-    linked = False
+def _atomic_create(directory: dirops.PinnedDirectory, name: str, data: bytes) -> bool:
     try:
-        file_descriptor = os.open(temporary, flags, 0o600, dir_fd=descriptor)
-        _write_all(file_descriptor, data)
-        os.fsync(file_descriptor)
-        os.close(file_descriptor)
-        file_descriptor = -1
-        try:
-            os.link(
-                temporary,
-                name,
-                src_dir_fd=descriptor,
-                dst_dir_fd=descriptor,
-                follow_symlinks=False,
-            )
-            linked = True
-        except FileExistsError:
-            return False
-        _fsync_directory(descriptor)
-        return True
+        return dirops.atomic_create(directory, name, data)
     except OSError as exc:
         raise _runtime_error(f"cannot create legacy lock record safely: {exc}") from exc
-    finally:
-        if file_descriptor >= 0:
-            os.close(file_descriptor)
-        try:
-            os.unlink(temporary, dir_fd=descriptor)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            if linked:
-                # The published record is valid; an invisible temp hard link
-                # can be cleaned by an operator without weakening the lock.
-                pass
 
 
 def _acquire(vault_root: Path, path: str, *, stale_after: int) -> int:
@@ -567,20 +426,11 @@ def _release(vault_root: Path, path: str) -> int:
     return 0
 
 
-def _record_names(descriptor: int) -> list[str]:
+def _record_names(directory: dirops.PinnedDirectory) -> list[str]:
     try:
-        names: list[str] = []
-        count = 0
-        with os.scandir(descriptor) as entries:
-            for entry in entries:
-                count += 1
-                if count > MAX_LOCK_DIRECTORY_ENTRIES:
-                    raise _runtime_error(
-                        "legacy lock directory exceeds its entry limit"
-                    )
-                if entry.name.endswith(".lock"):
-                    names.append(entry.name)
-        return sorted(names)
+        return dirops.record_names(
+            directory, suffix=".lock", max_entries=MAX_LOCK_DIRECTORY_ENTRIES
+        )
     except OSError as exc:
         raise _runtime_error(
             f"cannot list legacy lock directory safely: {exc}"

@@ -1,81 +1,79 @@
 # codex-brain
 
-Manifesto do plugin: `.codex-plugin/plugin.json`. Instalacao: veja
+Plugin manifest: `.codex-plugin/plugin.json`. Installation: see
 `README.md`.
 
-Plugin de memoria persistente para o Codex: um vault local, com escrita
-sempre revisada por transacao (plano -> hash aprovado -> apply), ledgers de
-proveniencia de fonte/claim, e uma skill de onboarding que propoe conteudo
-em vez de escrever sozinha.
+Persistent memory plugin for Codex: a local vault with writes always
+reviewed through a transaction (plan -> approved hash -> apply), source/
+claim provenance ledgers, and an onboarding skill that proposes content
+instead of writing on its own.
 
-## Regra central
+## Core rule
 
-Nenhuma escrita no vault do usuario acontece fora de uma transacao revisada:
-plano (dry-run) -> hash aprovado -> apply. Isso vale para toda skill deste
-plugin. Nunca editar arquivos do vault diretamente com ferramentas de
-escrita genericas.
+No write to the user's vault happens outside a reviewed transaction: plan
+(dry-run) -> approved hash -> apply. This applies to every skill in this
+plugin. Never edit vault files directly with generic write tools.
 
-## Motor
+## Engine
 
-`skills/brain-init/scripts/vault.py` e o ponto de entrada do motor. Resolva
-o vault do usuario por `--vault` explicito, `CODEX_BRAIN`, ou
-`.codex-brain.json` mais proximo — nunca use a raiz deste plugin como
-vault.
+`skills/brain-init/scripts/vault.py` is the engine's entry point. Resolve
+the user's vault via explicit `--vault`, `CODEX_BRAIN`, or the nearest
+`.codex-brain.json` — never use this plugin's own root as a vault.
 
 ```bash
 python3 skills/brain-init/scripts/vault.py --help
 ```
 
-As demais skills (`brain-save`, `brain-ingest`, `brain-query`,
+The other skills (`brain-save`, `brain-ingest`, `brain-query`,
 `brain-onboarding`, `brain-new-person`, `brain-new-project`,
-`brain-write-like-me`, `brain-assistant`, `brain-loop`) resolvem o mesmo
-motor por caminho relativo, assumindo que todas as skills deste plugin
-ficam instaladas como irmas (mesmo diretorio pai em `~/.agents/skills/`).
+`brain-write-like-me`, `brain-assistant`, `brain-loop`) resolve the same
+engine via a relative path, assuming every skill in this plugin is
+installed as siblings (same parent directory under `~/.agents/skills/`).
 
 ## Hooks
 
-`hooks/hooks.json` declara dois hooks de ciclo de vida, ambos read-only
-(nunca escrevem no vault):
+`hooks/hooks.json` declares two lifecycle hooks, both read-only (neither
+ever writes to the vault):
 
-- `SessionStart` — injeta `wiki/hot.md` no contexto da sessao. **Desligado
-  por padrao**: so ativa se a variavel de ambiente
-  `CODEX_BRAIN_SESSION_CONTEXT=1` estiver definida no ambiente de quem
-  chama — sem isso, emite string vazia. E uma decisao de privacidade
-  deliberada: ler o vault e local, mas colocar esse conteudo dentro de uma
-  sessao hospedada e egress, e egress exige opt-in explicito do usuario.
-- `Stop` — avisa (via `systemMessage`) se sobrou uma transacao incompleta
-  (`mutation.lock` preso, journal em `prepared`/`applying`/
-  `rollback-failed`) que precisa de `transaction recover`.
+- `SessionStart` — injects `wiki/hot.md` into the session context.
+  **Off by default**: only activates when the `CODEX_BRAIN_SESSION_CONTEXT=1`
+  environment variable is set by the caller — without it, it emits an
+  empty string. This is a deliberate privacy decision: reading the vault
+  is local, but putting that content inside a hosted session is egress,
+  and egress requires explicit user opt-in.
+- `Stop` — warns (via `systemMessage`) when an incomplete transaction is
+  left behind (a stuck `mutation.lock`, or a journal in `prepared`/
+  `applying`/`rollback-failed` state) that needs `transaction recover`.
 
-## Estrutura de um vault deste plugin
+## Structure of a vault built with this plugin
 
-- `wiki/` — conhecimento gerado (paginas, index, log, hot cache, ledgers).
-  Gerenciado exclusivamente via transacao.
-- `.raw/` — payloads de fonte imutaveis.
-- `wiki/people/` — pessoas e colaboradores.
-- `wiki/projects/` — trabalho ativo de longa duracao.
-- `wiki/experiments/` — investigacoes curtas, descartaveis.
-- `inbox/` — staging visivel para fontes a processar.
+- `wiki/` — generated knowledge (pages, index, log, hot cache, ledgers).
+  Managed exclusively through transactions.
+- `.raw/` — immutable source payloads.
+- `wiki/people/` — people and collaborators.
+- `wiki/projects/` — long-running active work.
+- `wiki/experiments/` — short-lived, disposable investigations.
+- `inbox/` — visible staging area for sources to process.
 
 ## Skills
 
-- `skills/brain-init/` — inicializar ou adotar um vault existente.
-- `skills/brain-save/` — persistir um resultado especifico de conversa.
-- `skills/brain-ingest/` — transformar uma fonte fornecida em paginas
-  conectadas e citadas.
-- `skills/brain-query/` — responder usando so o que ja esta no vault
+- `skills/brain-init/` — initialize or adopt an existing vault.
+- `skills/brain-save/` — persist a specific result from a conversation.
+- `skills/brain-ingest/` — turn a supplied source into connected, cited
+  pages.
+- `skills/brain-query/` — answer using only what is already in the vault
   (read-only).
-- `skills/brain-onboarding/` — primeira configuracao: entender o workspace,
-  perguntar sobre projetos e pessoas relevantes, e propor ativamente notas
-  em `wiki/people/` e `wiki/projects/` a partir do que for encontrado, sempre pedindo
-  aprovacao antes de escrever.
-- `skills/brain-new-person/` — criar ou atualizar uma nota em `wiki/people/`.
-- `skills/brain-new-project/` — criar um projeto ou experimento novo com
-  README (e opcionalmente `AGENTS.md` local).
-- `skills/brain-write-like-me/` — extrair um perfil de estilo de escrita a
-  partir de amostras aprovadas pelo usuario.
-- `skills/brain-assistant/` — apoio continuo apos o onboarding: contexto,
-  rascunhos, proximos passos.
-- `skills/brain-loop/` — desenhar uma checagem recorrente orquestrada por
-  um agendador externo (`codex exec` via cron); nunca aplica escrita sem
-  supervisao.
+- `skills/brain-onboarding/` — first-run setup: understand the workspace,
+  ask about relevant projects and people, and proactively propose notes
+  in `wiki/people/` and `wiki/projects/` based on what it finds, always
+  asking for approval before writing.
+- `skills/brain-new-person/` — create or update a note in `wiki/people/`.
+- `skills/brain-new-project/` — create a new project or experiment with a
+  README (and optionally a local `AGENTS.md`).
+- `skills/brain-write-like-me/` — extract a writing-style profile from
+  samples the user approves.
+- `skills/brain-assistant/` — ongoing support after onboarding: context,
+  drafts, next steps.
+- `skills/brain-loop/` — design a recurring check orchestrated by an
+  external scheduler (`codex exec` via cron); never applies a write
+  unattended.

@@ -42,16 +42,38 @@ def classify_volume(volume_root: str) -> VolumeKind:
 
     Cached per volume-root string for the process lifetime: cheap calls, but
     no reason to repeat them for every path component touched in a run.
+
+    Never raises: any Win32 call failure here falls back to UNKNOWN (which
+    paths.capability_for treats as UNSAFE_REFUSED, the fail-closed choice),
+    but the failure is printed to stderr first -- silently swallowing it
+    previously meant a real user (or the first Windows CI run, which is how
+    this diagnostic got added) saw a generic "cannot host vault writes
+    safely" with no indication of which Win32 call actually failed or why.
     """
+
+    import sys
 
     import win32file
 
-    drive_type = win32file.GetDriveType(volume_root)
+    try:
+        drive_type = win32file.GetDriveType(volume_root)
+    except Exception as exc:
+        print(
+            f"codex-brain: cannot classify volume {volume_root!r} "
+            f"(GetDriveType failed): {exc!r}",
+            file=sys.stderr,
+        )
+        return VolumeKind.UNKNOWN
     if drive_type == win32file.DRIVE_REMOTE:
         return VolumeKind.SMB_NETWORK
     try:
         _, _, _, _, fs_name = win32file.GetVolumeInformation(volume_root)
-    except Exception:
+    except Exception as exc:
+        print(
+            f"codex-brain: cannot classify volume {volume_root!r} "
+            f"(GetVolumeInformation failed): {exc!r}",
+            file=sys.stderr,
+        )
         return VolumeKind.UNKNOWN
     fs_name = (fs_name or "").upper()
     if fs_name in _FAT_FS_NAMES:
@@ -60,6 +82,11 @@ def classify_volume(volume_root: str) -> VolumeKind:
         return VolumeKind.REFS_LOCAL
     if fs_name == "NTFS":
         return VolumeKind.NTFS_LOCAL
+    print(
+        f"codex-brain: volume {volume_root!r} reports unrecognized filesystem "
+        f"name {fs_name!r}",
+        file=sys.stderr,
+    )
     return VolumeKind.UNKNOWN
 
 

@@ -155,12 +155,16 @@ def try_acquire_exclusive(handle: DirectoryHandle) -> bool:
 
     overlapped = pywintypes.OVERLAPPED()
     try:
+        # pywin32's LockFileEx takes a single combined byte-count arg, not
+        # separate low/high DWORDs like the raw Win32 API -- confirmed by the
+        # third real Windows CI run, which hit
+        # "TypeError: LockFileEx() takes exactly 5 arguments (6 given)"
+        # against the 6-arg (low, high split) call this used to make.
         win32file.LockFileEx(
             handle.handle,
             win32con.LOCKFILE_EXCLUSIVE_LOCK | win32con.LOCKFILE_FAIL_IMMEDIATELY,
             0,
-            0xFFFFFFFF,
-            0xFFFFFFFF,
+            0xFFFFFFFFFFFFFFFF,
             overlapped,
         )
     except pywintypes.error:
@@ -177,7 +181,8 @@ def release_exclusive(handle: DirectoryHandle) -> None:
     win32file = _win32file()
     import pywintypes
 
-    win32file.UnlockFileEx(handle.handle, 0, 0xFFFFFFFF, 0xFFFFFFFF, pywintypes.OVERLAPPED())
+    # Same combined-byte-count signature as LockFileEx above (4 args, not 5).
+    win32file.UnlockFileEx(handle.handle, 0, 0xFFFFFFFFFFFFFFFF, pywintypes.OVERLAPPED())
 
 
 def final_path_for_handle(handle: DirectoryHandle) -> Path:

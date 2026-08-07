@@ -47,11 +47,21 @@ def _install_fake_win32(monkeypatch, *, create_file_raises=None, get_info_raises
         # (attrs, ctime, atime, mtime, volSerial, sizeHigh, sizeLow, nlinks, idxHigh, idxLow)
         return (0, None, None, None, 111, 0, 0, 1, 222, 333)
 
+    def _lock_file_ex(handle, flags, reserved, nNumberOfBytesToLock, overlapped):
+        # Real pywin32 signature is 5 positional args (a single combined
+        # byte-count, not separate low/high DWORDs) -- a strict arity here is
+        # what would have caught the third real Windows CI run's
+        # "TypeError: LockFileEx() takes exactly 5 arguments (6 given)".
+        return None
+
+    def _unlock_file_ex(handle, reserved, nNumberOfBytesToLock, overlapped):
+        return None
+
     fake_win32file = types.SimpleNamespace(
         CreateFile=_create_file,
         GetFileInformationByHandle=_get_file_information_by_handle,
-        LockFileEx=lambda *a, **k: None,
-        UnlockFileEx=lambda *a, **k: None,
+        LockFileEx=_lock_file_ex,
+        UnlockFileEx=_unlock_file_ex,
         GetFinalPathNameByHandle=lambda h, flags: "\\\\?\\C:\\vault\\wiki",
     )
     fake_win32con = types.SimpleNamespace(

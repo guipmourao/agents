@@ -18,11 +18,12 @@ from typing import Any, Mapping, Sequence
 
 from .json_utils import parse_finite_json_float
 from .lint_engine import lint_vault
-from .paths import canonical, directory_open_flags, read_open_flags
+from .paths import canonical, directory_open_flags, is_name_surrogate, read_open_flags
 from .transaction import (
     RESULT_SCHEMA,
     MutationLock,
     TransactionError,
+    _open_runtime_directory_at,
     _safe_hash,
     _safe_vault_path,
     safe_operation_id,
@@ -67,7 +68,14 @@ def _active_root_fd(root: Path) -> int | None:
 
 
 def _descriptor_root_path(root: Path) -> tuple[Path, tuple[int, ...]]:
-    """Return a subprocess cwd pinned to the held vault directory."""
+    """Return a subprocess cwd pinned to the held vault directory.
+
+    COMPATIBLE tier (native Windows) never populates ``_ACTIVE_ROOT`` at all
+    -- see ``checkpoint_operation`` -- so ``descriptor`` is always ``None``
+    there and this always takes the ``return root, ()`` path below: plain
+    ``root`` is already the real vault path with no fd to resolve away from,
+    so there is nothing for a Windows-specific branch here to do.
+    """
 
     descriptor = _active_root_fd(root)
     if descriptor is None:
@@ -329,14 +337,31 @@ class _CheckpointStore:
         self.lock = lock
         self.root = root
         self.operation_id = operation_id
-        self.meta_fd = lock.duplicate_parent_fd()
-        self.transactions_fd = -1
-        self.operation_fd = -1
+        # COMPATIBLE tier (native Windows): MutationLock never sets a POSIX
+        # fd (see transaction._acquire_compatible), so duplicate_parent_fd/
+        # open_metadata_dir_fd -- both STRICT-only -- would raise LOCK_NOT_HELD.
+        # Use plain paths instead, validated the same way transaction.py's
+        # _open_runtime_directory_at already validates COMPATIBLE-tier
+        # runtime directories elsewhere.
+        if lock._win_root_handle is not None:
+            self.meta_fd: int | Path = root / ".vault-meta"
+        else:
+            self.meta_fd = lock.duplicate_parent_fd()
+        self.transactions_fd: int | Path = -1
+        self.operation_fd: int | Path = -1
         try:
-            self.transactions_fd = lock.open_metadata_dir_fd("transactions")
-            self.operation_fd = lock.open_metadata_dir_fd(
-                f"transactions/{operation_id}"
-            )
+            if isinstance(self.meta_fd, Path):
+                self.transactions_fd = _open_runtime_directory_at(
+                    self.meta_fd, "transactions", create=False
+                )
+                self.operation_fd = _open_runtime_directory_at(
+                    self.transactions_fd, operation_id, create=False
+                )
+            else:
+                self.transactions_fd = lock.open_metadata_dir_fd("transactions")
+                self.operation_fd = lock.open_metadata_dir_fd(
+                    f"transactions/{operation_id}"
+                )
         except (OSError, TransactionError) as exc:
             self.close()
             cause = exc.__cause__ if isinstance(exc, TransactionError) else exc
@@ -358,9 +383,13 @@ class _CheckpointStore:
         return self.root / ".vault-meta" / "transactions" / self.operation_id
 
     def close(self) -> None:
+        if isinstance(self.meta_fd, Path):
+            self.transactions_fd = -1
+            self.operation_fd = -1
+            return
         for name in ("operation_fd", "transactions_fd", "meta_fd"):
             descriptor = getattr(self, name, -1)
-            if descriptor >= 0:
+            if isinstance(descriptor, int) and descriptor >= 0:
                 os.close(descriptor)
                 setattr(self, name, -1)
 
@@ -372,6 +401,30 @@ class _CheckpointStore:
 
     def _assert_current(self) -> None:
         self.lock.assert_runtime_namespace_current()
+        if isinstance(self.meta_fd, Path):
+            # COMPATIBLE tier: point-in-time lstat, not pinned-descriptor
+            # identity -- the same narrowed-TOCTOU tradeoff as every other
+            # degraded-mode check in this port (see transaction.py's
+            # MutationLock._acquire_compatible docstring).
+            try:
+                transactions = self.transactions_fd.lstat()
+                operation = self.operation_fd.lstat()
+            except OSError as exc:
+                raise CheckpointError(
+                    "RUNTIME_NAMESPACE_CHANGED",
+                    f"checkpoint runtime namespace changed: {exc}",
+                ) from exc
+            if (
+                is_name_surrogate(transactions)
+                or not stat.S_ISDIR(transactions.st_mode)
+                or is_name_surrogate(operation)
+                or not stat.S_ISDIR(operation.st_mode)
+            ):
+                raise CheckpointError(
+                    "RUNTIME_NAMESPACE_CHANGED",
+                    "checkpoint runtime namespace changed while the lock was held",
+                )
+            return
         try:
             transactions = os.stat(
                 "transactions", dir_fd=self.meta_fd, follow_symlinks=False
@@ -402,6 +455,20 @@ class _CheckpointStore:
             )
 
     def exists(self, name: str) -> bool:
+        if isinstance(self.operation_fd, Path):
+            try:
+                metadata = (self.operation_fd / name).lstat()
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise CheckpointError(
+                    "CORRUPT_CHECKPOINT", f"cannot inspect {name}: {exc}"
+                ) from exc
+            if not stat.S_ISREG(metadata.st_mode):
+                raise CheckpointError(
+                    "CORRUPT_CHECKPOINT", f"checkpoint state is not regular: {name}"
+                )
+            return True
         try:
             metadata = os.stat(name, dir_fd=self.operation_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -417,6 +484,43 @@ class _CheckpointStore:
         return True
 
     def read(self, name: str, *, label: str, code: str) -> dict[str, Any]:
+        if isinstance(self.operation_fd, Path):
+            target = self.operation_fd / name
+            descriptor = -1
+            try:
+                before = target.lstat()
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or before.st_size > MAX_CHECKPOINT_STATE_BYTES
+                ):
+                    raise CheckpointError(code, f"{label} is not a bounded regular file")
+                descriptor = os.open(target, read_open_flags())
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                    raise CheckpointError(code, f"{label} changed before it could be read")
+                chunks: list[bytes] = []
+                remaining = MAX_CHECKPOINT_STATE_BYTES + 1
+                while remaining > 0:
+                    block = os.read(descriptor, min(remaining, 1024 * 1024))
+                    if not block:
+                        break
+                    chunks.append(block)
+                    remaining -= len(block)
+                raw = b"".join(chunks)
+                after = os.fstat(descriptor)
+                stable = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode")
+                if len(raw) > MAX_CHECKPOINT_STATE_BYTES or any(
+                    getattr(opened, field) != getattr(after, field) for field in stable
+                ):
+                    raise CheckpointError(code, f"{label} changed while it was read")
+                return _strict_json_object(raw, label=label, code=code)
+            except FileNotFoundError as exc:
+                raise CheckpointError(code, f"cannot find {label}") from exc
+            except OSError as exc:
+                raise CheckpointError(code, f"cannot read {label}: {exc}") from exc
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
         descriptor = -1
         try:
             before = os.stat(name, dir_fd=self.operation_fd, follow_symlinks=False)
@@ -463,6 +567,35 @@ class _CheckpointStore:
                 "CHECKPOINT_STATE_TOO_LARGE",
                 f"checkpoint state exceeds {MAX_CHECKPOINT_STATE_BYTES} bytes",
             )
+        if isinstance(self.operation_fd, Path):
+            target = self.operation_fd / name
+            temporary = self.operation_fd / f".{name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+            descriptor = -1
+            try:
+                descriptor = os.open(
+                    temporary,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                )
+                with os.fdopen(descriptor, "wb") as handle:
+                    descriptor = -1
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, target)
+                self._assert_current()
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+            return
         temporary = f".{name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
         descriptor = -1
         try:
@@ -499,6 +632,17 @@ class _CheckpointStore:
 
     def unlink(self, name: str) -> None:
         self._assert_current()
+        if isinstance(self.operation_fd, Path):
+            try:
+                (self.operation_fd / name).unlink()
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise CheckpointError(
+                    "CORRUPT_CHECKPOINT", f"cannot remove {name}: {exc}"
+                ) from exc
+            self._assert_current()
+            return
         try:
             os.unlink(name, dir_fd=self.operation_fd)
         except FileNotFoundError:
@@ -511,6 +655,36 @@ class _CheckpointStore:
         self._assert_current()
 
     def other_pending(self) -> str | None:
+        if isinstance(self.transactions_fd, Path):
+            try:
+                names = sorted(p.name for p in self.transactions_fd.iterdir())
+            except OSError as exc:
+                raise CheckpointError(
+                    "CORRUPT_CHECKPOINT", f"cannot list transaction state: {exc}"
+                ) from exc
+            if len(names) > MAX_CHECKPOINT_RUNTIME_ENTRIES:
+                raise CheckpointError(
+                    "CORRUPT_CHECKPOINT",
+                    "transaction runtime exceeds the checkpoint entry limit",
+                )
+            for name in names:
+                if name == self.operation_id:
+                    continue
+                try:
+                    pending = (self.transactions_fd / name / PENDING_NAME).lstat()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise CheckpointError(
+                        "CORRUPT_CHECKPOINT", f"unsafe transaction entry {name}: {exc}"
+                    ) from exc
+                if not stat.S_ISREG(pending.st_mode):
+                    raise CheckpointError(
+                        "CORRUPT_CHECKPOINT",
+                        f"unsafe pending checkpoint state: {name}",
+                    )
+                return name
+            return None
         try:
             with os.scandir(self.transactions_fd) as entries:
                 names: list[str] = []
@@ -681,7 +855,7 @@ def _verify_worktree(
     vault_root: Path,
     expected_hashes: Mapping[str, str],
     *,
-    root_fd: int | None = None,
+    root_fd: int | Path | None = None,
 ) -> None:
     for relative, expected in expected_hashes.items():
         try:
@@ -1203,8 +1377,18 @@ def checkpoint_operation(
             "INVALID_AS_OF", "as_of must be an ISO date, date object, or null"
         )
     with MutationLock(root) as mutation_lock:
-        root_fd = mutation_lock.duplicate_root_fd()
-        active_token: Token[tuple[Path, int] | None] = _ACTIVE_ROOT.set((root, root_fd))
+        # COMPATIBLE tier (native Windows): duplicate_root_fd is STRICT-only
+        # (MutationLock never sets a POSIX fd there -- see
+        # _acquire_compatible) and would raise LOCK_NOT_HELD. Leaving
+        # _ACTIVE_ROOT unset there is correct, not a shortcut:
+        # _descriptor_root_path/_same_as_active_root's existing "no active
+        # fd" branch already does the right thing -- root is already a real
+        # path, nothing to resolve away from a descriptor.
+        root_fd: int | None = None
+        active_token: Token[tuple[Path, int] | None] | None = None
+        if mutation_lock._win_root_handle is None:
+            root_fd = mutation_lock.duplicate_root_fd()
+            active_token = _ACTIVE_ROOT.set((root, root_fd))
         try:
             with _CheckpointStore(mutation_lock, root, operation_id) as store:
                 _repository_head(root)
@@ -1362,5 +1546,7 @@ def checkpoint_operation(
                 )
                 return _resume_pending(root, store, validated)
         finally:
-            _ACTIVE_ROOT.reset(active_token)
-            os.close(root_fd)
+            if active_token is not None:
+                _ACTIVE_ROOT.reset(active_token)
+            if root_fd is not None:
+                os.close(root_fd)

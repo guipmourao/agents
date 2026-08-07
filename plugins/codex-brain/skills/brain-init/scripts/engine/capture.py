@@ -31,7 +31,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .json_utils import parse_finite_json_float
 
-from .paths import canonical, is_relative_to
+from .hostplatform.capability import GuaranteeTier
+from .paths import assert_unaliased_directory, canonical, is_name_surrogate, is_relative_to
 from .transaction import (
     BUNDLE_SCHEMA,
     TransactionValidationError,
@@ -45,6 +46,7 @@ from .transaction import (
     _read_lock_owner_at,
     _release_vault_advisory_lock,
     _remove_lock_directory_at,
+    _require_write_platform,
     _try_vault_advisory_lock,
     _write_lock_owner_at,
     apply_bundle,
@@ -190,13 +192,46 @@ def _process_alive(pid: int) -> bool | None:
 
 
 def _safe_runtime_dir(vault_root: Path) -> Path:
-    """Create the capture runtime through a no-follow vault descriptor."""
+    """Create the capture runtime through a no-follow vault descriptor.
+
+    Gated through ``transaction._require_write_platform`` (same tier
+    resolution + ``CODEX_BRAIN_WINDOWS_WRITE`` opt-in as every other write
+    path in this port) instead of capture.py's own ad-hoc platform check, so
+    this and transaction.py's writes can never disagree about what a given
+    vault/host combination is allowed to do.
+    """
 
     root = canonical(vault_root)
     if not root.is_dir():
         raise CaptureValidationError(
             "VAULT_MISSING", f"vault is not a directory: {root}"
         )
+    try:
+        tier = _require_write_platform(root)
+    except TransactionValidationError as exc:
+        raise CaptureValidationError(exc.code, str(exc)) from exc
+    if tier is GuaranteeTier.COMPATIBLE:
+        # No dir_fd confinement on native Windows (see
+        # transaction.MutationLock._acquire_compatible's docstring) --
+        # create/verify by path instead, narrowing the TOCTOU window rather
+        # than eliminating it, the same tradeoff already made throughout
+        # this port.
+        target = root / ".vault-meta" / "capture"
+        try:
+            (root / ".vault-meta").mkdir(mode=0o700, exist_ok=True)
+            target.mkdir(mode=0o700, exist_ok=True)
+            metadata = assert_unaliased_directory(target)
+            if is_name_surrogate(metadata):
+                raise CaptureValidationError(
+                    "RUNTIME_SYMLINK",
+                    f"capture runtime path must be a confined directory: {target}",
+                )
+        except OSError as exc:
+            raise CaptureValidationError(
+                "QUEUE_LOCK_UNSUPPORTED",
+                f"cannot create a confined capture runtime: {exc}",
+            ) from exc
+        return target
     root_fd = -1
     runtime_fd = -1
     try:
@@ -228,9 +263,20 @@ def _safe_runtime_dir(vault_root: Path) -> Path:
     return root / ".vault-meta" / "capture"
 
 
-def _runtime_entry_exists(runtime_fd: int, name: str) -> bool:
+def _runtime_entry_exists(runtime_fd: int | Path, name: str) -> bool:
     """Inspect one fixed runtime leaf without following an alias."""
 
+    if isinstance(runtime_fd, Path):
+        try:
+            (runtime_fd / name).lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise TransactionValidationError(
+                "UNSAFE_VAULT_PATH",
+                f"cannot inspect .vault-meta/capture/{name}: {exc}",
+            ) from exc
+        return True
     try:
         os.stat(name, dir_fd=runtime_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -244,7 +290,7 @@ def _runtime_entry_exists(runtime_fd: int, name: str) -> bool:
 
 
 def _read_runtime_regular(
-    runtime_fd: int,
+    runtime_fd: int | Path,
     name: str,
     *,
     limit: int,
@@ -256,6 +302,94 @@ def _read_runtime_regular(
         raise TransactionValidationError(
             "INVALID_READ_LIMIT", "read limit must be positive"
         )
+    if isinstance(runtime_fd, Path):
+        target = runtime_fd / name
+        descriptor = -1
+        try:
+            metadata = target.lstat()
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise TransactionValidationError(
+                "VAULT_FILE_MISSING",
+                f"vault file is missing: .vault-meta/capture/{name}",
+            ) from None
+        except OSError as exc:
+            raise TransactionValidationError(
+                "UNSAFE_VAULT_PATH",
+                f"cannot inspect .vault-meta/capture/{name}: {exc}",
+            ) from exc
+        if is_name_surrogate(metadata):
+            raise TransactionValidationError(
+                "SYMLINK_WRITE_PATH",
+                f"vault file may not be a symlink: .vault-meta/capture/{name}",
+            )
+        if not stat.S_ISREG(metadata.st_mode):
+            raise TransactionValidationError(
+                "UNSAFE_VAULT_PATH",
+                f"vault file is not regular: .vault-meta/capture/{name}",
+            )
+        if metadata.st_size > limit:
+            raise TransactionValidationError(
+                "VAULT_FILE_TOO_LARGE",
+                f"vault file exceeds read limit: .vault-meta/capture/{name}",
+            )
+        try:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            descriptor = os.open(target, flags)
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+                metadata.st_dev,
+                metadata.st_ino,
+            ):
+                raise TransactionValidationError(
+                    "UNSAFE_VAULT_PATH",
+                    f"vault file changed or is not regular: .vault-meta/capture/{name}",
+                )
+            if opened.st_size > limit:
+                raise TransactionValidationError(
+                    "VAULT_FILE_TOO_LARGE",
+                    f"vault file exceeds read limit: .vault-meta/capture/{name}",
+                )
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                block = os.read(descriptor, min(1024 * 1024, limit + 1 - total))
+                if not block:
+                    break
+                chunks.append(block)
+                total += len(block)
+                if total > limit:
+                    raise TransactionValidationError(
+                        "VAULT_FILE_TOO_LARGE",
+                        f"vault file exceeds read limit: .vault-meta/capture/{name}",
+                    )
+            after = os.fstat(descriptor)
+            stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode")
+            if any(
+                getattr(opened, field) != getattr(after, field)
+                for field in stable_fields
+            ):
+                raise TransactionValidationError(
+                    "UNSAFE_VAULT_PATH",
+                    f"vault file changed while read: .vault-meta/capture/{name}",
+                )
+            return b"".join(chunks)
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise TransactionValidationError(
+                "VAULT_FILE_MISSING",
+                f"vault file is missing: .vault-meta/capture/{name}",
+            ) from None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
     try:
         metadata = os.stat(name, dir_fd=runtime_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -350,9 +484,37 @@ def _read_runtime_regular(
             os.close(descriptor)
 
 
-def _atomic_runtime_write(runtime_fd: int, name: str, data: bytes) -> None:
+def _atomic_runtime_write(runtime_fd: int | Path, name: str, data: bytes) -> None:
     """Atomically replace one queue leaf through the pinned runtime directory."""
 
+    if isinstance(runtime_fd, Path):
+        target = runtime_fd / name
+        temporary = runtime_fd / f".{name}.capture-{os.getpid()}-{uuid.uuid4().hex}"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return
     temporary = f".{name}.capture-{os.getpid()}-{uuid.uuid4().hex}"
     descriptor = -1
     try:
@@ -1458,6 +1620,10 @@ class CaptureQueueLock:
 
     def __post_init__(self) -> None:
         self.vault_root = canonical(self.vault_root)
+        # Gates COMPATIBLE tier behind CODEX_BRAIN_WINDOWS_WRITE and refuses
+        # UNSAFE_REFUSED outright, same as every other write path -- if this
+        # doesn't raise, self.runtime is already valid for whichever tier
+        # acquire() below will use.
         self.runtime = _safe_runtime_dir(self.vault_root)
         self.path = self.runtime / "queue.lock"
         self.owner_path = self.path / "owner.json"
@@ -1467,21 +1633,28 @@ class CaptureQueueLock:
         self._parent_fd: int | None = None
         self._lock_fd: int | None = None
         self._advisory_locked = False
+        # COMPATIBLE tier (native Windows) only -- see _acquire_compatible.
+        self._win_root_handle: Any = None
+        self._win_lock_dir: Path | None = None
 
     def _owner(self, lock_fd: int) -> dict[str, Any] | None:
         return _read_lock_owner_at(lock_fd)
 
-    def _may_reap(self, now: float, lock_fd: int) -> bool:
-        owner = self._owner(lock_fd)
+    def _may_reap_owner(
+        self,
+        now: float,
+        owner: dict[str, Any] | None,
+        *,
+        fallback_mtime: float | None,
+        process_alive: Any,
+    ) -> bool:
+        """Shared staleness policy behind both tiers' _may_reap* -- mirrors
+        transaction.MutationLock._may_reap_owner exactly."""
+
         if owner is None:
-            # The lock creator may still be between mkdir() and the owner write.
-            # Unknown ownership therefore requires the explicit recovery flag.
-            if not self.force_stale_lock:
+            if not self.force_stale_lock or fallback_mtime is None:
                 return False
-            try:
-                return now - os.fstat(lock_fd).st_mtime > self.stale_after
-            except OSError:
-                return False
+            return now - fallback_mtime > self.stale_after
         pid, started = owner.get("pid"), owner.get("started_epoch")
         if not isinstance(pid, int) or not isinstance(started, (int, float)):
             return False
@@ -1489,13 +1662,270 @@ class CaptureQueueLock:
             return False
         if self.force_stale_lock:
             return True
-        return (
-            owner.get("host") == socket.gethostname() and _process_alive(pid) is False
+        if owner.get("host") != socket.gethostname():
+            return False
+        return process_alive(pid) is False
+
+    def _may_reap(self, now: float, lock_fd: int) -> bool:
+        owner = self._owner(lock_fd)
+        fallback_mtime: float | None = None
+        if owner is None:
+            try:
+                fallback_mtime = os.fstat(lock_fd).st_mtime
+            except OSError:
+                fallback_mtime = None
+        return self._may_reap_owner(
+            now, owner, fallback_mtime=fallback_mtime, process_alive=_process_alive
         )
+
+    # --- COMPATIBLE tier (native Windows) -----------------------------------
+    # Mirrors transaction.MutationLock's COMPATIBLE tier exactly (same
+    # primitives, same narrowed-TOCTOU tradeoff); see that class's
+    # _acquire_compatible docstring for the design rationale. UNVERIFIED on
+    # a real Windows host -- see docs/windows-wsl.md.
+
+    def _owner_compatible(self, lock_dir: Path) -> dict[str, Any] | None:
+        owner_path = lock_dir / "owner.json"
+        try:
+            before = owner_path.lstat()
+        except OSError:
+            return None
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 64 * 1024:
+            return None
+        descriptor = -1
+        try:
+            from .paths import read_open_flags
+
+            descriptor = os.open(owner_path, read_open_flags())
+            current = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or current.st_size > 64 * 1024
+                or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                return None
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
+                raw = handle.read(64 * 1024 + 1)
+            if len(raw) > 64 * 1024:
+                return None
+            value = json.loads(raw.decode("utf-8"))
+            return value if isinstance(value, dict) else None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    def _may_reap_compatible(self, now: float, lock_dir: Path) -> bool:
+        owner = self._owner_compatible(lock_dir)
+        fallback_mtime: float | None = None
+        if owner is None:
+            try:
+                fallback_mtime = lock_dir.stat().st_mtime
+            except OSError:
+                fallback_mtime = None
+        from .hostplatform import windows_backend
+
+        return self._may_reap_owner(
+            now,
+            owner,
+            fallback_mtime=fallback_mtime,
+            process_alive=windows_backend.is_process_alive,
+        )
+
+    def _write_owner_compatible(self, lock_dir: Path, value: Mapping[str, Any]) -> None:
+        data = json.dumps(dict(value)).encode("utf-8")
+        temporary = lock_dir / f".owner.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, lock_dir / "owner.json")
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _remove_lock_dir_compatible(self, lock_dir: Path, expected: os.stat_result) -> None:
+        try:
+            (lock_dir / "owner.json").unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            current = lock_dir.lstat()
+        except FileNotFoundError as exc:
+            raise _LockIdentityChanged(f"lock directory identity changed: {lock_dir}") from exc
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (
+            expected.st_dev,
+            expected.st_ino,
+        ):
+            raise _LockIdentityChanged(f"lock directory identity changed: {lock_dir}")
+        lock_dir.rmdir()
+
+    def _close_descriptors_compatible(self) -> None:
+        from .hostplatform import windows_backend
+
+        self._win_lock_dir = None
+        if self._win_root_handle is not None:
+            if self._advisory_locked:
+                try:
+                    windows_backend.release_exclusive(self._win_root_handle)
+                except Exception:
+                    # Best-effort, matching posix_backend.release_vault_advisory_lock
+                    # (see transaction.MutationLock._close_descriptors_compatible
+                    # for the full rationale): closing the handle below also
+                    # releases the lock, so a failed explicit unlock must never
+                    # block cleanup.
+                    pass
+                self._advisory_locked = False
+            windows_backend.close_directory(self._win_root_handle)
+            self._win_root_handle = None
+
+    def _acquire_compatible(self) -> None:
+        from .hostplatform import windows_backend
+
+        deadline = time.monotonic() + max(0.0, self.timeout)
+        lock_dir = self.runtime / "queue.lock"
+        try:
+            root_handle = windows_backend.open_directory(self.vault_root)
+        except OSError as exc:
+            raise CaptureError(
+                "QUEUE_LOCK_FAILED", f"cannot pin capture vault root: {exc}"
+            ) from exc
+        self._win_root_handle = root_handle
+        try:
+            while True:
+                if windows_backend.try_acquire_exclusive(root_handle):
+                    break
+                if time.monotonic() >= deadline:
+                    raise CaptureConflict(
+                        "QUEUE_LOCK_TIMEOUT", "capture queue is locked by pid=unknown"
+                    )
+                time.sleep(self.poll_interval)
+            self._advisory_locked = True
+
+            while True:
+                try:
+                    lock_dir.mkdir(mode=0o700)
+                except FileExistsError:
+                    observed_owner = self._owner_compatible(lock_dir) or {}
+                    if self._may_reap_compatible(time.time(), lock_dir):
+                        try:
+                            pre_rename_stat = lock_dir.lstat()
+                        except OSError:
+                            continue
+                        quarantine = (
+                            self.runtime
+                            / f"queue.lock.reaping-{os.getpid()}-{uuid.uuid4().hex}"
+                        )
+                        try:
+                            os.rename(lock_dir, quarantine)
+                        except OSError:
+                            continue
+                        try:
+                            self._remove_lock_dir_compatible(quarantine, pre_rename_stat)
+                        except (_LockIdentityChanged, OSError):
+                            pass
+                        continue
+                    if time.monotonic() >= deadline:
+                        raise CaptureConflict(
+                            "QUEUE_LOCK_TIMEOUT",
+                            "capture queue is locked by "
+                            f"pid={observed_owner.get('pid', 'unknown')}",
+                        )
+                    time.sleep(self.poll_interval)
+                    continue
+                except OSError as exc:
+                    raise CaptureError(
+                        "QUEUE_LOCK_FAILED", f"cannot acquire queue lock: {exc}"
+                    ) from exc
+
+                self._win_lock_dir = lock_dir
+                owner = {
+                    "schema": "codex-brain.capture-lock.v1",
+                    "pid": os.getpid(),
+                    "host": socket.gethostname(),
+                    "token": self.token,
+                    "started_epoch": time.time(),
+                }
+                try:
+                    self._write_owner_compatible(lock_dir, owner)
+                except Exception as exc:
+                    try:
+                        expected = lock_dir.lstat()
+                        self._remove_lock_dir_compatible(lock_dir, expected)
+                    except OSError:
+                        pass
+                    raise CaptureError(
+                        "QUEUE_LOCK_FAILED", f"cannot write capture lock owner: {exc}"
+                    ) from exc
+                self.acquired = True
+                return
+        except BaseException:
+            if not self.acquired:
+                self._close_descriptors_compatible()
+            raise
+
+    def _release_compatible(self) -> None:
+        lock_dir = self._win_lock_dir
+        try:
+            if lock_dir is None:
+                raise CaptureConflict(
+                    "QUEUE_LOCK_OWNERSHIP_LOST",
+                    "capture queue lock descriptors were lost",
+                )
+            owner = self._owner_compatible(lock_dir)
+            if owner is None or owner.get("token") != self.token:
+                raise CaptureConflict(
+                    "QUEUE_LOCK_OWNERSHIP_LOST", "capture queue lock owner changed"
+                )
+            try:
+                expected = lock_dir.lstat()
+            except OSError as exc:
+                raise CaptureError(
+                    "QUEUE_LOCK_RELEASE_FAILED", f"cannot release queue lock: {exc}"
+                ) from exc
+            try:
+                self._remove_lock_dir_compatible(lock_dir, expected)
+            except _LockIdentityChanged as exc:
+                raise CaptureConflict(
+                    "QUEUE_LOCK_OWNERSHIP_LOST",
+                    "capture queue lock path changed before release",
+                ) from exc
+            except OSError as exc:
+                raise CaptureError(
+                    "QUEUE_LOCK_RELEASE_FAILED", f"cannot release queue lock: {exc}"
+                ) from exc
+        finally:
+            self.acquired = False
+            self._close_descriptors_compatible()
 
     def acquire(self) -> None:
         if self.acquired:
             return
+        tier = _require_write_platform(self.vault_root)
+        if tier is GuaranteeTier.COMPATIBLE:
+            self._acquire_compatible()
+            return
+        self._acquire_strict()
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        if self._win_root_handle is not None or self._win_lock_dir is not None:
+            self._release_compatible()
+            return
+        self._release_strict()
+
+    def _acquire_strict(self) -> None:
         deadline = time.monotonic() + max(0.0, self.timeout)
         try:
             root_fd = _open_lock_root_fd(self.vault_root)
@@ -1640,20 +2070,33 @@ class CaptureQueueLock:
                 return
         except BaseException:
             if not self.acquired:
-                self._close_descriptors()
+                self._close_descriptors_strict()
             raise
 
-    def duplicate_runtime_fd(self) -> int:
-        """Duplicate the exact capture directory held for this queue operation."""
+    def duplicate_runtime_fd(self) -> int | Path:
+        """Duplicate the exact capture directory held for this queue operation.
 
-        if not self.acquired or self._parent_fd is None:
+        COMPATIBLE tier (native Windows) has no fd to duplicate -- returns
+        the runtime Path directly; callers already accept ``int | Path``
+        (see ``_runtime_entry_exists``/``_read_runtime_regular``/
+        ``_atomic_runtime_write``).
+        """
+
+        if not self.acquired:
+            raise CaptureError(
+                "QUEUE_LOCK_NOT_HELD",
+                "capture runtime is unavailable outside a held queue lock",
+            )
+        if self._win_root_handle is not None:
+            return self.runtime
+        if self._parent_fd is None:
             raise CaptureError(
                 "QUEUE_LOCK_NOT_HELD",
                 "capture runtime is unavailable outside a held queue lock",
             )
         return os.dup(self._parent_fd)
 
-    def _close_descriptors(self) -> None:
+    def _close_descriptors_strict(self) -> None:
         if self._lock_fd is not None:
             os.close(self._lock_fd)
             self._lock_fd = None
@@ -1667,9 +2110,7 @@ class CaptureQueueLock:
             os.close(self._root_fd)
             self._root_fd = None
 
-    def release(self) -> None:
-        if not self.acquired:
-            return
+    def _release_strict(self) -> None:
         parent_fd, lock_fd = self._parent_fd, self._lock_fd
         try:
             if parent_fd is None or lock_fd is None:
@@ -1695,7 +2136,7 @@ class CaptureQueueLock:
                 ) from exc
         finally:
             self.acquired = False
-            self._close_descriptors()
+            self._close_descriptors_strict()
 
     def __enter__(self) -> "CaptureQueueLock":
         self.acquire()
@@ -1737,7 +2178,7 @@ class CaptureQueue:
         )
 
     @contextmanager
-    def _locked_runtime(self) -> Iterator[int]:
+    def _locked_runtime(self) -> Iterator[int | Path]:
         """Yield one duplicate of the runtime selected by the held queue lock."""
 
         with self.lock() as lock:
@@ -1745,7 +2186,8 @@ class CaptureQueue:
             try:
                 yield runtime_fd
             finally:
-                os.close(runtime_fd)
+                if isinstance(runtime_fd, int):
+                    os.close(runtime_fd)
 
     @staticmethod
     def _validate_document(value: Any) -> dict[str, Any]:

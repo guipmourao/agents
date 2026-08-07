@@ -746,6 +746,24 @@ def _portable_file_mode(st_mode: int) -> int:
     return st_mode & 0o777
 
 
+def _default_new_file_mode() -> int:
+    """Default recorded mode for a brand-new file (no prior original_mode to
+    preserve). Must agree with what _portable_file_mode will report back on
+    read-after-write verification -- on Windows that is unconditionally
+    0o644 (the CRT synthesizes bits regardless of what chmod/fchmod actually
+    requested), so recording POSIX's 0o600 default there would make every
+    freshly created file fail its own post-write RESULT_DRIFT check. Caught
+    by the first real Windows CI run (see docs/windows-wsl.md) -- mocked
+    win32 tests never exercise real chmod-on-NTFS semantics.
+
+    A function, not a module-level constant, for the same reason
+    _portable_file_mode checks os.name live rather than baking it in at
+    import time: it keeps this monkeypatch-testable.
+    """
+
+    return 0o644 if os.name == "nt" else 0o600
+
+
 def read_vault_regular(
     vault_root: Path | str,
     relative: str,
@@ -4078,7 +4096,7 @@ def _prepare_writes(
                 content_sha256=content_hash,
                 original_sha256=current_hash,
                 original_mode=original_mode,
-                new_mode=original_mode if original_mode is not None else 0o600,
+                new_mode=original_mode if original_mode is not None else _default_new_file_mode(),
                 backup_path=backup,
             )
         )

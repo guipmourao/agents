@@ -1635,6 +1635,7 @@ class CaptureQueueLock:
         self._advisory_locked = False
         # COMPATIBLE tier (native Windows) only -- see _acquire_compatible.
         self._win_root_handle: Any = None
+        self._win_lock_file_handle: Any = None
         self._win_lock_dir: Path | None = None
 
     def _owner(self, lock_fd: int) -> dict[str, Any] | None:
@@ -1774,10 +1775,10 @@ class CaptureQueueLock:
         from .hostplatform import windows_backend
 
         self._win_lock_dir = None
-        if self._win_root_handle is not None:
+        if self._win_lock_file_handle is not None:
             if self._advisory_locked:
                 try:
-                    windows_backend.release_exclusive(self._win_root_handle)
+                    windows_backend.release_exclusive(self._win_lock_file_handle)
                 except Exception:
                     # Best-effort, matching posix_backend.release_vault_advisory_lock
                     # (see transaction.MutationLock._close_descriptors_compatible
@@ -1786,6 +1787,9 @@ class CaptureQueueLock:
                     # block cleanup.
                     pass
                 self._advisory_locked = False
+            windows_backend.close_directory(self._win_lock_file_handle)
+            self._win_lock_file_handle = None
+        if self._win_root_handle is not None:
             windows_backend.close_directory(self._win_root_handle)
             self._win_root_handle = None
 
@@ -1802,8 +1806,21 @@ class CaptureQueueLock:
             ) from exc
         self._win_root_handle = root_handle
         try:
+            # LockFileEx rejects directory handles (winerror=87 on every real
+            # attempt -- see transaction.MutationLock._acquire_compatible for
+            # the full story) -- lock a dedicated file instead.
+            try:
+                lock_file_handle = windows_backend.open_lock_file(
+                    self.runtime / "queue.lockfile"
+                )
+            except OSError as exc:
+                raise CaptureError(
+                    "QUEUE_LOCK_FAILED", f"cannot open capture queue lock file: {exc}"
+                ) from exc
+            self._win_lock_file_handle = lock_file_handle
+
             while True:
-                if windows_backend.try_acquire_exclusive(root_handle):
+                if windows_backend.try_acquire_exclusive(lock_file_handle):
                     break
                 if time.monotonic() >= deadline:
                     raise CaptureConflict(

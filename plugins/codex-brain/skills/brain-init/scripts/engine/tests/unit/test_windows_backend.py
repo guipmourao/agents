@@ -72,10 +72,13 @@ def _install_fake_win32(monkeypatch, *, create_file_raises=None, get_info_raises
     )
     fake_win32con = types.SimpleNamespace(
         GENERIC_READ=1,
+        GENERIC_WRITE=2,
         FILE_SHARE_READ=1,
         FILE_SHARE_WRITE=2,
         FILE_SHARE_DELETE=4,
         OPEN_EXISTING=3,
+        OPEN_ALWAYS=4,
+        FILE_ATTRIBUTE_NORMAL=0x80,
         FILE_FLAG_BACKUP_SEMANTICS=0x02000000,
         LOCKFILE_EXCLUSIVE_LOCK=2,
         LOCKFILE_FAIL_IMMEDIATELY=1,
@@ -147,6 +150,34 @@ def test_open_directory_after_open_hook_runs_before_identity_read(monkeypatch, t
 def test_windows_identity_zero_index_is_unstable():
     identity = wb.WindowsIdentity(volume_serial_number=1, file_index_high=0, file_index_low=0)
     assert not identity.is_stable()
+
+
+def test_open_lock_file_captures_identity(monkeypatch, tmp_path):
+    _install_fake_win32(monkeypatch)
+    result = wb.open_lock_file(tmp_path / "mutation.lockfile")
+    assert result.identity.volume_serial_number == 111
+    assert result.identity.is_stable()
+
+
+def test_open_lock_file_uses_generic_write_and_open_always(monkeypatch, tmp_path):
+    """The regression that motivated open_lock_file: LockFileEx rejects
+    directory handles (real winerror=87 on the fifth Windows CI run), so
+    the exclusivity lock must target a real file opened for read+write,
+    created if absent -- not a directory handle opened read-only."""
+
+    _install_fake_win32(monkeypatch)
+    seen = {}
+
+    def _create_file(path, access, share, security, disposition, flags, template):
+        seen["access"] = access
+        seen["disposition"] = disposition
+        return _FakeHandle()
+
+    sys.modules["win32file"].CreateFile = _create_file
+    wb.open_lock_file(tmp_path / "mutation.lockfile")
+    win32con = sys.modules["win32con"]
+    assert seen["access"] == win32con.GENERIC_READ | win32con.GENERIC_WRITE
+    assert seen["disposition"] == win32con.OPEN_ALWAYS
 
 
 def test_try_acquire_exclusive_true_on_success(monkeypatch, tmp_path):

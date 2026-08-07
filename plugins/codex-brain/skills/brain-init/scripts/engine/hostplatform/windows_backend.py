@@ -141,12 +141,49 @@ def close_directory(handle: DirectoryHandle) -> None:
     handle.handle.Close()
 
 
+def open_lock_file(path: Path) -> DirectoryHandle:
+    """Open (creating if absent) a regular file at ``path`` for
+    ``try_acquire_exclusive``/``release_exclusive``.
+
+    LockFileEx does not accept a directory handle -- confirmed by the fifth
+    real windows-latest CI run, which got winerror=87
+    (ERROR_INVALID_PARAMETER) on every attempt to lock the handle
+    ``open_directory`` returns for the vault root. Process-exclusivity
+    locks a dedicated file inside the vault's metadata directory instead;
+    ``open_directory`` on the vault root itself is still used for identity
+    checks, just never passed to ``try_acquire_exclusive`` anymore.
+    """
+
+    win32file = _win32file()
+    import win32con
+
+    handle = win32file.CreateFile(
+        str(path),
+        win32con.GENERIC_READ | win32con.GENERIC_WRITE,
+        win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE | win32con.FILE_SHARE_DELETE,
+        None,
+        win32con.OPEN_ALWAYS,
+        win32con.FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    try:
+        info = win32file.GetFileInformationByHandle(handle)
+    except Exception:
+        handle.Close()
+        raise
+    identity = WindowsIdentity(
+        volume_serial_number=info[4],
+        file_index_high=info[8],
+        file_index_low=info[9],
+    )
+    return DirectoryHandle(path=path, handle=handle, identity=identity)
+
+
 def try_acquire_exclusive(handle: DirectoryHandle) -> bool:
     """Non-blocking exclusive lock, mirroring ``fcntl.flock(LOCK_EX|LOCK_NB)``.
 
-    Windows supports locking a directory handle directly — unlike POSIX's
-    directory-``flock`` portability quirks, this is not a degraded
-    substitute, it is the equivalent-strength primitive for this one piece.
+    Must be called with a handle from ``open_lock_file``, not
+    ``open_directory`` -- see that function's docstring for why.
     """
 
     win32file = _win32file()

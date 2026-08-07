@@ -33,10 +33,13 @@ def _install_fake_win32(monkeypatch):
     )
     fake_win32con = types.SimpleNamespace(
         GENERIC_READ=1,
+        GENERIC_WRITE=2,
         FILE_SHARE_READ=1,
         FILE_SHARE_WRITE=2,
         FILE_SHARE_DELETE=4,
         OPEN_EXISTING=3,
+        OPEN_ALWAYS=4,
+        FILE_ATTRIBUTE_NORMAL=0x80,
         FILE_FLAG_BACKUP_SEMANTICS=0x02000000,
         LOCKFILE_EXCLUSIVE_LOCK=2,
         LOCKFILE_FAIL_IMMEDIATELY=1,

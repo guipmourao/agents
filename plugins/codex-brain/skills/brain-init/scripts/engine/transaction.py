@@ -1661,6 +1661,7 @@ class MutationLock:
         # COMPATIBLE tier (native Windows) only -- see _acquire_compatible.
         # Left None on POSIX/STRICT tier for the whole lifetime of the lock.
         self._win_root_handle: Any = None
+        self._win_lock_file_handle: Any = None
         self._win_lock_dir: Path | None = None
 
     @property
@@ -1730,9 +1731,11 @@ class MutationLock:
     # throughout this file's existing degraded branches (_atomic_vault_write,
     # _confined_vault_unlink, _path_mode_identity). Process-exclusivity still
     # needs a real OS primitive with crash-safe auto-release, which plain path
-    # operations cannot provide -- that part uses
-    # hostplatform.windows_backend's CreateFileW + LockFileEx directory
-    # handle, not a marker file/directory alone.
+    # operations cannot provide -- that part uses hostplatform.windows_backend's
+    # CreateFileW + LockFileEx on a dedicated lock *file* inside .vault-meta
+    # (LockFileEx rejects directory handles -- confirmed by the fifth real
+    # Windows CI run's winerror=87; the vault-root directory handle is still
+    # opened for identity checks, just never locked directly).
     #
     # UNVERIFIED on a real Windows host as of this writing (no Windows CI has
     # run yet -- see docs/windows-wsl.md and the port plan's phase 8 rollout
@@ -1841,10 +1844,10 @@ class MutationLock:
         from .hostplatform import windows_backend
 
         self._win_lock_dir = None
-        if self._win_root_handle is not None:
+        if self._win_lock_file_handle is not None:
             if self._advisory_locked:
                 try:
-                    windows_backend.release_exclusive(self._win_root_handle)
+                    windows_backend.release_exclusive(self._win_lock_file_handle)
                 except Exception:
                     # Best-effort, matching posix_backend.release_vault_advisory_lock:
                     # closing the handle below also releases the lock, and a
@@ -1852,6 +1855,9 @@ class MutationLock:
                     # underlying win32 call raises) must never block cleanup.
                     pass
                 self._advisory_locked = False
+            windows_backend.close_directory(self._win_lock_file_handle)
+            self._win_lock_file_handle = None
+        if self._win_root_handle is not None:
             windows_backend.close_directory(self._win_root_handle)
             self._win_root_handle = None
 
@@ -1885,16 +1891,6 @@ class MutationLock:
         self._win_root_handle = root_handle
 
         try:
-            while True:
-                if windows_backend.try_acquire_exclusive(root_handle):
-                    break
-                if time.monotonic() >= deadline:
-                    raise TransactionConflict(
-                        "LOCK_TIMEOUT", "vault mutation lock is held (owner pid=unknown)"
-                    )
-                time.sleep(self.poll_interval)
-            self._advisory_locked = True
-
             try:
                 meta_dir.mkdir(mode=0o700, exist_ok=True)
             except OSError as exc:
@@ -1903,6 +1899,28 @@ class MutationLock:
                     "LOCK_FAILED", f"cannot pin mutation lock parent: {remapped}"
                 ) from remapped
             self.path = lock_dir
+
+            # LockFileEx rejects directory handles (winerror=87 on every real
+            # attempt against root_handle) -- lock a dedicated file instead.
+            try:
+                lock_file_handle = windows_backend.open_lock_file(
+                    meta_dir / "mutation.lockfile"
+                )
+            except OSError as exc:
+                raise TransactionError(
+                    "LOCK_FAILED", f"cannot open mutation lock file: {exc}"
+                ) from exc
+            self._win_lock_file_handle = lock_file_handle
+
+            while True:
+                if windows_backend.try_acquire_exclusive(lock_file_handle):
+                    break
+                if time.monotonic() >= deadline:
+                    raise TransactionConflict(
+                        "LOCK_TIMEOUT", "vault mutation lock is held (owner pid=unknown)"
+                    )
+                time.sleep(self.poll_interval)
+            self._advisory_locked = True
 
             while True:
                 try:
